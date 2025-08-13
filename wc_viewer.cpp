@@ -49,6 +49,7 @@ struct Texture{
     vector<uint8_t> rgba; // RGBA8
     vector<uint8_t> idx;  // original palette indices
     GLuint gl=0;
+    std::string name;     // TXMP name (up to 8 chars)
     bool valid() const { return w>0 && h>0 && rgba.size()==(size_t)w*h*4; }
 };
 
@@ -635,6 +636,13 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             size_t len = ch.size;
             int w=0,h=0; vector<uint8_t> rgba, idx;
             Texture T;
+            if(len >= 8){
+                char nbuf[9];
+                std::memcpy(nbuf, p, 8);
+                nbuf[8] = 0;
+                T.name = nbuf;
+                while(!T.name.empty() && (T.name.back() == '\0' || T.name.back() == ' ')) T.name.pop_back();
+            }
             if(decode_TXMP_WC3(p, len, w, h, idx, rgba)){
                 if(12 + (size_t)w*h == len) ++rawCnt; else ++rleCnt;
                 T.w=w; T.h=h; T.idx.swap(idx); T.rgba.swap(rgba); ++ok;
@@ -940,14 +948,19 @@ static bool exportOBJ(const Model& M, const std::string& outBase){
 
     // write textures + MTL
     size_t tgaCount=0;
+    std::string texDir;
+    size_t slash = mtlPath.find_last_of("/\\");
+    if(slash != std::string::npos) texDir = mtlPath.substr(0, slash+1);
     for(size_t i=0;i<M.textures.size();++i){
         const auto& T = M.textures[i];
-	std::string texPath = outBase + "_tex_%02zu.tga";
-        char buf[32]; std::snprintf(buf,sizeof(buf),texPath.c_str(), i);
-        if(T.valid()){ writeTGA(buf, T.w, T.h, T.rgba.data()); ++tgaCount; }
+        char defName[16]; std::snprintf(defName, sizeof(defName), "tex_%02zu", i);
+        std::string texName = T.name.empty() ? std::string(defName) : T.name;
+        std::string fileName = texName + ".tga";
+        std::string fullPath = texDir + fileName;
+        if(T.valid()){ writeTGA(fullPath, T.w, T.h, T.rgba.data()); ++tgaCount; }
         mtl << "newmtl m_tex" << i << "\n";
         mtl << "Kd 1 1 1\n";
-        mtl << "map_Kd " << buf << "\n\n";
+        mtl << "map_Kd " << fileName << "\n\n";
     }
     mtl << "newmtl m_tex65535\nKd 1 1 1\n\n";
 
