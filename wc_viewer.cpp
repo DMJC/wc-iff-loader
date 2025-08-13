@@ -47,6 +47,7 @@ struct Tri{
 struct Texture{
     int w=0,h=0;
     vector<uint8_t> rgba; // RGBA8
+    vector<uint8_t> idx;  // original palette indices
     GLuint gl=0;
     bool valid() const { return w>0 && h>0 && rgba.size()==(size_t)w*h*4; }
 };
@@ -240,7 +241,8 @@ static void palToRGBA(const vector<uint8_t>& idx, int w, int h, vector<uint8_t>&
     }
 }
 
-static bool decode_TXMP_WC3(const uint8_t* data, size_t len, int& w, int& h, std::vector<uint8_t>& rgba){
+static bool decode_TXMP_WC3(const uint8_t* data, size_t len, int& w, int& h,
+                            std::vector<uint8_t>& idx, std::vector<uint8_t>& rgba){
     auto sane_dims = [](int W,int H)->bool{
         return (W>0 && H>0 && W<=4096 && H<=4096 && (int64_t)W*(int64_t)H <= (1<<26));
     };
@@ -261,22 +263,23 @@ static bool decode_TXMP_WC3(const uint8_t* data, size_t len, int& w, int& h, std
         size_t ilen = img ? (len - (size_t)v.offP) : 0;
         size_t need = (size_t)W * (size_t)H;
 
-        std::vector<uint8_t> idx;
+        std::vector<uint8_t> idxLocal;
         bool ok = false;
 
         // --- RAW (with optional trailing pad) ---
         // Some WC3 TXMPs store RAW pal8 plus 1 padding byte (observed on EXCAL: 01,12,15).
         if (ilen >= need && ilen - need <= 2) {
-            idx.assign(img, img + need);   // ignore pad
+            idxLocal.assign(img, img + need);   // ignore pad
             ok = true;
         }
 
         // --- RLE fallback (whole-image RLE stream) ---
         if (!ok && img) {
-            if (rle_expand(img, ilen, need, idx)) ok = true;
+            if (rle_expand(img, ilen, need, idxLocal)) ok = true;
         }
 
         if (ok) {
+            idx = std::move(idxLocal);
             palToRGBA(idx, W, H, rgba);
             w = W; h = H;
             // Optional debug:
@@ -630,11 +633,11 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             ++total;
             const uint8_t* p = &iff.buf[ch.payload];
             size_t len = ch.size;
-            int w=0,h=0; vector<uint8_t> rgba;
+            int w=0,h=0; vector<uint8_t> rgba, idx;
             Texture T;
-            if(decode_TXMP_WC3(p, len, w, h, rgba)){
+            if(decode_TXMP_WC3(p, len, w, h, idx, rgba)){
                 if(12 + (size_t)w*h == len) ++rawCnt; else ++rleCnt;
-                T.w=w; T.h=h; T.rgba.swap(rgba); ++ok;
+                T.w=w; T.h=h; T.idx.swap(idx); T.rgba.swap(rgba); ++ok;
             }else{
                 // placeholder to keep indices aligned
                 T.w=2; T.h=2; T.rgba={255,0,255,255, 0,0,0,0, 0,0,0,0, 255,0,255,255};
@@ -1044,25 +1047,38 @@ static void drawBBox(const Vec3& bmin, const Vec3& bmax, GLuint prog, GLint uMVP
 // ----------------------------- main -----------------------------
 int main(int argc, char** argv){
     if(argc<2){
-        std::cerr<<"Usage: "<<argv[0]<<" FILE.IFF [--out BASE] [--pal pal.json] [--pal-offset N] [--export] [--export-only] [--no-fit]\n";
+        std::cerr<<"Usage: "<<argv[0]<<" FILE.IFF [--out BASE] [--export] [--export-only] [--no-fit]\n";
         return 1;
     }
     string path = argv[1];
     string outBase = stemFromPath(path);
 
     // Parse flags up-front so palette is ready BEFORE decoding textures
-    string palPath; int palOffsetCLI=0; bool exportOnStart=false; bool exportOnly=false; bool noFit=false;
+    bool exportOnStart=false; bool exportOnly=false; bool noFit=false;
     for(int i=2;i<argc;i++){
         string a=argv[i];
         if(a=="--out" && i+1<argc) outBase = argv[++i];
-        else if(a=="--pal" && i+1<argc) palPath = argv[++i];
-        else if(a=="--pal-offset" && i+1<argc) palOffsetCLI = std::atoi(argv[++i]);
         else if(a=="--export") exportOnStart = true;
         else if(a=="--export-only") exportOnly = true;
         else if(a=="--no-fit") noFit = true;
     }
-    if(!palPath.empty()){
-        if(!loadPaletteJSON(palPath, palOffsetCLI)) makeDefaultPalette();
+
+    std::vector<std::string> paletteFiles = {"wc3pal.json","wc4pal.json","armpal.json"};
+    std::vector<std::array<std::array<uint8_t,3>,256>> loadedPalettes;
+    for(const auto& f : paletteFiles){
+        if(loadPaletteJSON(f,0)){
+            std::array<std::array<uint8_t,3>,256> pal{};
+            for(int i=0;i<256;i++) pal[i]=gPalette[i];
+            loadedPalettes.push_back(pal);
+        }else{
+            std::array<std::array<uint8_t,3>,256> pal{};
+            for(int i=0;i<256;i++){ pal[i][0]=pal[i][1]=pal[i][2]=(uint8_t)i; }
+            loadedPalettes.push_back(pal);
+        }
+    }
+    int currentPalette = 0;
+    if(!loadedPalettes.empty()){
+        for(int i=0;i<256;i++) gPalette[i] = loadedPalettes[currentPalette][i];
     }else{
         makeDefaultPalette();
     }
@@ -1166,6 +1182,19 @@ int main(int argc, char** argv){
                 SDL_Scancode sc = e.key.keysym.scancode;
                 if(sc==SDL_SCANCODE_ESCAPE) { SDL_GL_DeleteContext(glc); SDL_DestroyWindow(win); SDL_Quit(); return 0; }
                 if(sc==SDL_SCANCODE_O || sc==SDL_SCANCODE_E){ std::cerr<<"[export] key -> OBJ/MTL/TGA\n"; exportOBJ(M, outBase); }
+                if(sc==SDL_SCANCODE_P){
+                    currentPalette = (currentPalette + 1) % loadedPalettes.size();
+                    std::cerr << "[pal] switching to " << paletteFiles[currentPalette] << "\n";
+                    for(int i=0;i<256;i++) gPalette[i] = loadedPalettes[currentPalette][i];
+                    for(auto& T : M.textures){
+                        if(!T.idx.empty()){
+                            palToRGBA(T.idx, T.w, T.h, T.rgba);
+                            glBindTexture(GL_TEXTURE_2D, T.gl);
+                            glTexSubImage2D(GL_TEXTURE_2D,0,0,0,T.w,T.h,GL_RGBA,GL_UNSIGNED_BYTE,T.rgba.data());
+                        }
+                    }
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                }
                 if(sc==SDL_SCANCODE_B){ drawBox = !drawBox; }
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
