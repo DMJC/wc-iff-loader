@@ -983,41 +983,65 @@ static bool exportOBJ(const Model& M, const std::string& outBase){
     }
     mtl << "newmtl m_tex65535\nKd 1 1 1\n\n";
 
-    // vt and faces grouped by texture
-    std::unordered_map<uint16_t, vector<size_t>> facesByTex;
+    // Sequentially write faces preserving group ranges for sub-objects (e.g. turrets)
+    std::vector<ObjGroup> groups = M.groups;
+    std::sort(groups.begin(), groups.end(),
+              [](const ObjGroup& a, const ObjGroup& b){ return a.firstTri < b.firstTri; });
+
+    // Start with main model name (hull) until first group
+    std::string hullName = M.name.empty() ? std::string("hull") : M.name;
+    obj << "o " << hullName << "\n";
+
+    size_t groupIdx = 0;
+    size_t nextGroupStart = groupIdx < groups.size() ? groups[groupIdx].firstTri : size_t(-1);
+    size_t currentGroupEnd = nextGroupStart; // hull until first group
+    std::string currentObj = hullName;
+
+    uint16_t currentMtl = 65535;
+    size_t vtBase = 1;
     for(size_t i=0;i<M.tris.size();++i){
+        // Enter next group when reaching its first triangle
+        if(i == nextGroupStart){
+            currentObj = groups[groupIdx].name;
+            obj << "o " << currentObj << "\n";
+            currentGroupEnd = groups[groupIdx].firstTri + groups[groupIdx].triCount;
+            ++groupIdx;
+            nextGroupStart = groupIdx < groups.size() ? groups[groupIdx].firstTri : size_t(-1);
+        }else if(i == currentGroupEnd){
+            // Exit group back to hull until next group
+            currentObj = hullName;
+            obj << "o " << currentObj << "\n";
+            currentGroupEnd = nextGroupStart;
+        }
+
         uint16_t t = M.tris[i].tex;
         if(!(t < M.textures.size() && M.textures[t].valid())) t = 65535;
-        facesByTex[t].push_back(i);
-    }
-    vector<std::pair<float,float>> vts; vts.reserve(M.tris.size()*3);
+        if(t != currentMtl){
+            obj << "usemtl m_tex" << t << "\n";
+            currentMtl = t;
+        }
 
-    size_t vtBase = 1;
-    for(const auto& kv : facesByTex){
-        uint16_t t = kv.first;
-        obj << "usemtl m_tex" << t << "\n";
         float invW=1.f, invH=1.f;
         if(t<M.textures.size() && M.textures[t].valid()){
             invW = 1.f / M.textures[t].w;
             invH = 1.f / M.textures[t].h;
         }
-        for(size_t fi : kv.second){
-            const Tri& tr = M.tris[fi];
-            // write vt triplet
-            for(int k=0;k<3;k++){
-                float u=0.f, v=0.f;
-                if(tr.hasTex){
-                    u = tr.uv[k*2+0] * invW;
-                    v = 1.0f - tr.uv[k*2+1] * invH; // OBJ v-up
-                }
-                obj << "vt " << u << " " << v << "\n";
+
+        const Tri& tr = M.tris[i];
+        for(int k=0;k<3;k++){
+            float u=0.f, v=0.f;
+            if(tr.hasTex){
+                u = tr.uv[k*2+0] * invW;
+                v = 1.0f - tr.uv[k*2+1] * invH; // OBJ v-up
             }
-            size_t vt0 = vtBase; vtBase += 3;
-            obj << "f "
-                << (tr.v[0]+1) << "/" << vt0   << " "
-                << (tr.v[1]+1) << "/" << vt0+1 << " "
-                << (tr.v[2]+1) << "/" << vt0+2 << "\n";
+            obj << "vt " << u << " " << v << "\n";
         }
+
+        size_t vt0 = vtBase; vtBase += 3;
+        obj << "f "
+            << (tr.v[0]+1) << "/" << vt0   << " "
+            << (tr.v[1]+1) << "/" << vt0+1 << " "
+            << (tr.v[2]+1) << "/" << vt0+2 << "\n";
     }
     std::cerr<<"[export] wrote "<<tgaCount<<" TGAs + OBJ/MTL\n";
     return true;
