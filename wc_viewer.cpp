@@ -720,22 +720,22 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 return best;
             };
 
-            auto be16s = [](const uint8_t* p)->int16_t { return int16_t((p[0]<<8) | p[1]); };
-
             // ... inside the per-triplet loop, after you get s1 (points to "<NAME>_TRT")
             bool gotPos = false;
             if (!elevMarks.empty()) {
                 const uint8_t* r = nearestPrevElev(s1);
-                if (r && (size_t)(s1 - r) <= 512 && (r - tbeg) >= 16) {
-                    // Take the 16 bytes immediately before the 0x5A marker
-                    const uint8_t* w = r - 16;
-                    // First three BE16 shorts in that window are X, Y, Z in model units
-                    rec.pos.x = be16s(w + 0);
-                    rec.pos.y = be16s(w + 2);
-                    rec.pos.z = be16s(w + 4);
-                    rec.elevCap = 90;
-                    rec.guns    = 1; // not used for placement
-                    gotPos = true;
+                // turret mount data lives 24 bytes before the elevation marker
+                if (r && (size_t)(s1 - r) <= 512 && (r - tbeg) >= 24) {
+                    const uint8_t* w = r - 24;
+                    // Expect "SER\0" then three LE32 coords
+                    if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
+                        rec.pos.x = le32s(w + 4);
+                        rec.pos.y = le32s(w + 8);
+                        rec.pos.z = le32s(w + 12);
+                        rec.elevCap = 90;
+                        rec.guns    = 1; // not used for placement
+                        gotPos = true;
+                    }
                 }
             }
 
@@ -799,19 +799,14 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     
                 // Base
                 Model baseM;
-                if (load_part(T.baseModel, baseM)) {
-                    glm::vec3 basePos(T.pos.x, T.pos.y, T.pos.z);
-                    appendModelInto(M, baseM, basePos, "turret_base_" + std::to_string(i));
-                } else {
+                if (!load_part(T.baseModel, baseM)) {
                     std::cerr << "[TURT] Missing " << T.baseModel << ".IFF\n";
                 }
 
+                // Gun
                 Model gunM;
-                if (load_part(T.gunModel, gunM)) {
-                    glm::vec3 basePos(T.pos.x, T.pos.y, T.pos.z);
-                    appendModelInto(M, gunM, basePos, "turret_gun_" + std::to_string(i));
-                } else {
-                    std::cerr << "[TURT] Missing " << T.baseModel << ".IFF\n";
+                if (!load_part(T.gunModel, gunM)) {
+                    std::cerr << "[TURT] Missing " << T.gunModel << ".IFF\n";
                 }
     
                 // Place base at mount (viewer verts are /256.0f)
