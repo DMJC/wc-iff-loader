@@ -5,6 +5,7 @@
 #include <GL/glew.h>
 #include <GL/gl.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -674,8 +675,10 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             std::string gunModel;   // "CRUL_GUN"
             std::string weapon;     // "TURLASER" / "ANTIGUN"
             glm::ivec3  pos{0,0,0}; // mount (int units); viewer verts use /256
-            int elevCap = 90;       // often 0x5A
-            int guns    = 1;        // often 1
+            float       pitch = 0;  // degrees
+            float       yaw   = 0;  // degrees
+            int         elevCap = 90; // often 0x5A
+            int         guns    = 1;  // often 1
         };
         std::vector<TurretRec> turrets;
     
@@ -720,22 +723,24 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 return best;
             };
 
-            auto be16s = [](const uint8_t* p)->int16_t { return int16_t((p[0]<<8) | p[1]); };
-
             // ... inside the per-triplet loop, after you get s1 (points to "<NAME>_TRT")
             bool gotPos = false;
             if (!elevMarks.empty()) {
                 const uint8_t* r = nearestPrevElev(s1);
-                if (r && (size_t)(s1 - r) <= 512 && (r - tbeg) >= 16) {
-                    // Take the 16 bytes immediately before the 0x5A marker
-                    const uint8_t* w = r - 16;
-                    // First three BE16 shorts in that window are X, Y, Z in model units
-                    rec.pos.x = be16s(w + 0);
-                    rec.pos.y = be16s(w + 2);
-                    rec.pos.z = be16s(w + 4);
-                    rec.elevCap = 90;
-                    rec.guns    = 1; // not used for placement
-                    gotPos = true;
+                // turret mount data lives 24 bytes before the elevation marker
+                if (r && (size_t)(s1 - r) <= 512 && (r - tbeg) >= 24) {
+                    const uint8_t* w = r - 24;
+                    // Expect "SER\0" then three LE32 coords
+                    if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
+                        rec.pos.x = le32s(w + 4);
+                        rec.pos.y = le32s(w + 8);
+                        rec.pos.z = le32s(w + 12);
+                        rec.pitch  = le32s(w + 16) / 256.0f;
+                        rec.yaw    = le32s(w + 20) / 256.0f;
+                        rec.elevCap = 90;
+                        rec.guns    = 1; // not used for placement
+                        gotPos = true;
+                    }
                 }
             }
 
@@ -743,7 +748,8 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 std::cerr << "[TURT] " << rec.baseModel << " no elev marker within 512 bytes; using (0,0,0)\n";
             }
             std::cerr << "[TURT] " << rec.baseModel << " pos=("
-                      << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")\n";
+                      << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")"
+                      << " yaw=" << rec.yaw << " pitch=" << rec.pitch << "\n";
 /*            // Some files may store guns as LE32=1; support both.
             const size_t BACK = 128;
             const uint8_t* preStart = (s1 > tbeg + BACK) ? (s1 - BACK) : tbeg;
@@ -775,7 +781,6 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             if (!gotPos) {
                 std::cerr << "[TURT] " << rec.baseModel << " no mount marker near strings; using (0,0,0)\n";
             }*/
-            std::cerr << "[TURT] " << rec.baseModel << " pos=(" << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")\n";
             turrets.push_back(std::move(rec));
             p = e3 + 1; // continue after weapon
         }
@@ -794,29 +799,41 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 return load_wc3_model_hcl_textured(file, out); // recursive use is OK
             };
     
+            auto rotate_model = [](Model& m, float pitchDeg, float yawDeg) {
+                float yawRad   = glm::radians(yawDeg);
+                float pitchRad = glm::radians(pitchDeg);
+                glm::mat4 R(1.0f);
+                R = glm::rotate(R, yawRad,   glm::vec3(0,1,0));
+                R = glm::rotate(R, pitchRad, glm::vec3(1,0,0));
+                for (auto& v : m.verts) {
+                    glm::vec4 p(v.x, v.y, v.z, 1.0f);
+                    p = R * p;
+                    v.x = p.x; v.y = p.y; v.z = p.z;
+                }
+            };
+
             for (size_t i = 0; i < turrets.size(); ++i) {
                 const auto& T = turrets[i];
-    
+
                 // Base
                 Model baseM;
-                if (load_part(T.baseModel, baseM)) {
-                    glm::vec3 basePos(T.pos.x, T.pos.y, T.pos.z);
-                    appendModelInto(M, baseM, basePos, "turret_base_" + std::to_string(i));
-                } else {
+                if (!load_part(T.baseModel, baseM)) {
                     std::cerr << "[TURT] Missing " << T.baseModel << ".IFF\n";
                 }
 
+                // Gun
                 Model gunM;
-                if (load_part(T.gunModel, gunM)) {
-                    glm::vec3 basePos(T.pos.x, T.pos.y, T.pos.z);
-                    appendModelInto(M, gunM, basePos, "turret_gun_" + std::to_string(i));
-                } else {
-                    std::cerr << "[TURT] Missing " << T.baseModel << ".IFF\n";
+                if (!load_part(T.gunModel, gunM)) {
+                    std::cerr << "[TURT] Missing " << T.gunModel << ".IFF\n";
                 }
-    
+
+                // Apply mount rotation
+                rotate_model(baseM, T.pitch, T.yaw);
+                rotate_model(gunM,  T.pitch, T.yaw);
+
                 // Place base at mount (viewer verts are /256.0f)
                 glm::vec3 basePos = glm::vec3(T.pos.x/256.0f, T.pos.y/256.0f, T.pos.z/256.0f);
-    
+
                 // Parent indices: ship = -1, base = idx of pushed base
                 int baseIdx = (int)M.submodels.size();
                 M.submodels.push_back(SubModel{
@@ -826,18 +843,20 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                     std::move(baseM),
                     -1 // parent is ship
                 });
-    
-                // Gun at (0,0,0) under the base
+
+                // Gun at mount, shares base rotation
                 if (!gunM.tris.empty() || !gunM.verts.empty()) {
                     M.submodels.push_back(SubModel{
                         "turret_gun_" + std::to_string(i),
                         T.weapon,
-                        glm::vec3(0.0f),
+                        basePos,
                         std::move(gunM),
                         baseIdx // parent is the base we just pushed
                     });
                 }
-                std::cerr << "[TURT] " << T.baseModel << " pos=("<< T.pos.x << "," << T.pos.y << "," << T.pos.z << ")\n";
+                std::cerr << "[TURT] " << T.baseModel << " pos=("
+                          << T.pos.x << "," << T.pos.y << "," << T.pos.z << ")"
+                          << " yaw=" << T.yaw << " pitch=" << T.pitch << "\n";
                 flattenSubmodelsInto(M);
             }
         }
