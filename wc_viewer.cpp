@@ -1134,6 +1134,8 @@ int main(int argc, char** argv){
     SDL_GLContext glc = SDL_GL_CreateContext(win);
     glewExperimental=GL_TRUE; glewInit();
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     // Upload textures (+ fallback white)
     for(auto& T : M.textures) uploadTexture(T);
@@ -1153,7 +1155,7 @@ int main(int argc, char** argv){
     const char* FS =
         "#version 330 core\n"
         "in vec2 vUV; uniform sampler2D uTex; out vec4 o;\n"
-        "void main(){ o = texture(uTex, vUV); }\n";
+        "void main(){ vec4 c = texture(uTex, vUV); if(c.a < 0.5) discard; o = c; }\n";
     GLuint prog = makeProgram(VS,FS);
     GLint uMVP = glGetUniformLocation(prog,"uMVP");
     GLint uTex = glGetUniformLocation(prog,"uTex");
