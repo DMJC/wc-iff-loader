@@ -731,28 +731,34 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             bool gotPos = false;
             if (!elevMarks.empty()) {
                 const uint8_t* r = nearestNextElev(e3);
-                // turret mount data lives 24 bytes before the elevation marker
-                if (r && (size_t)(r - e3) <= 512 && (r - tbeg) >= 24) {
+                if (r && (size_t)(r - e3) <= 512) {
+                    // Blocks with "SER\0" use little-endian and sit 24 bytes before
+                    // the elevation marker.  Others omit the prefix and place 5 big-
+                    // endian values 20 bytes before the marker.
                     const uint8_t* w = r - 24;
-                    // Some files prefix the mount block with "SER\0" and
-                    // little-endian numbers, others omit it and store
-                    // big-endian coordinates. Detect the prefix to decide.
-                    if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
+                    bool serPrefix = (r - tbeg) >= 24 && w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0;
+                    bool valid = false;
+                    if (serPrefix) {
                         rec.pos.x = le32s(w + 4);
                         rec.pos.y = le32s(w + 8);
                         rec.pos.z = le32s(w + 12);
                         rec.pitch  = le32s(w + 16) / 256.0f;
                         rec.yaw    = le32s(w + 20) / 256.0f;
-                    } else {
-                        rec.pos.x = (int32_t)be32(w + 4);
-                        rec.pos.y = (int32_t)be32(w + 8);
-                        rec.pos.z = (int32_t)be32(w + 12);
-                        rec.pitch  = (int32_t)be32(w + 16) / 256.0f;
-                        rec.yaw    = (int32_t)be32(w + 20) / 256.0f;
+                        valid = true;
+                    } else if ((r - tbeg) >= 20) {
+                        w = r - 20;
+                        rec.pos.x = (int32_t)be32(w + 0);
+                        rec.pos.y = (int32_t)be32(w + 4);
+                        rec.pos.z = (int32_t)be32(w + 8);
+                        rec.pitch  = (int32_t)be32(w + 12) / 256.0f;
+                        rec.yaw    = (int32_t)be32(w + 16) / 256.0f;
+                        valid = true;
                     }
-                    rec.elevCap = 90;
-                    rec.guns    = 1; // not used for placement
-                    gotPos = true;
+                    if (valid) {
+                        rec.elevCap = 90;
+                        rec.guns    = 1; // not used for placement
+                        gotPos = true;
+                    }
                 }
             }
 
