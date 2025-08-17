@@ -658,11 +658,6 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     }
     std::cerr << "[geom] verts="<<M.verts.size()<<" tris="<<M.tris.size()<<" tex="<<M.textures.size()<<"\n";
 
-    // Helpers for BE/LE (you already have le32s/le16u etc.)
-    auto be32 = [&](const uint8_t* p){ return (uint32_t(p[0])<<24)|(uint32_t(p[1])<<16)|(uint32_t(p[2])<<8)|uint32_t(p[3]); };
-    auto le32u = [&](const uint8_t* p){ return (uint32_t(p[3])<<24)|(uint32_t(p[2])<<16)|(uint32_t(p[1])<<8)|uint32_t(p[0]); };
-    auto le32s = [&](const uint8_t* p){ return (int32_t)le32u(p); };
-    
     // Find TURT bytes
     if (TURT) {
         const uint8_t* turt = &iff.buf[TURT->start+8];
@@ -682,16 +677,6 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         };
         std::vector<TurretRec> turrets;
     
-        // Pre-scan elevation markers. Some files store the 0x5A value in
-        // little-endian form while others use big-endian.  Record both.
-        std::vector<const uint8_t*> elevMarks;
-        for (const uint8_t* q = tbeg; q + 4 <= tend; ++q) {
-            bool le = (q[0]==0x5A && q[1]==0x00 && q[2]==0x00 && q[3]==0x00);
-            bool be = (q[0]==0x00 && q[1]==0x5A && q[2]==0x00 && q[3]==0x00);
-            if (le || be) elevMarks.push_back(q + (le ? 0 : 1));
-        }
-
-        // Scan for "<NAME>_TRT\0<NAME>_GUN\0<WEAPON>\0"
         const uint8_t* p = tbeg;
         while (p + 16 < tend) {
             // seek zero-terminated string
@@ -719,45 +704,39 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             std::string weapon((const char*)s3, size_t(e3 - s3));
     
             TurretRec rec; rec.baseModel = baseModel; rec.gunModel = gunModel; rec.weapon = weapon;
-                
-            // --- find nearest following elev marker and read mount XYZ ---
-            auto nearestNextElev = [&](const uint8_t* s)->const uint8_t* {
-                const uint8_t* best = nullptr;
-                for (const uint8_t* q : elevMarks) if (q > s && (!best || q < best)) best = q;
-                return best;
-            };
 
-            // After obtaining e3 (end of weapon string)
             bool gotPos = false;
-            if (!elevMarks.empty()) {
-                const uint8_t* r = nearestNextElev(e3);
-                if (r && (size_t)(r - e3) <= 512) {
-                    // Blocks with "SER\0" use little-endian and sit 24 bytes before
-                    // the elevation marker.  Others omit the prefix and place 5 big-
-                    // endian values 20 bytes before the marker.
-                    const uint8_t* w = r - 24;
-                    bool serPrefix = (r - tbeg) >= 24 && w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0;
-                    bool valid = false;
-                    if (serPrefix) {
-                        rec.pos.x = le32s(w + 4);
-                        rec.pos.y = le32s(w + 8);
-                        rec.pos.z = le32s(w + 12);
-                        rec.pitch  = le32s(w + 16) / 256.0f;
-                        rec.yaw    = le32s(w + 20) / 256.0f;
-                        valid = true;
-                    } else if ((r - tbeg) >= 20) {
-                        w = r - 20;
+            for (const uint8_t* q = e3; !gotPos && q + 4 <= tend && (size_t)(q - e3) <= 512; ++q) {
+                // Little-endian block prefixed with "SER\0" 24 bytes earlier
+                if (q[0]==0x5A && q[1]==0x00 && q[2]==0x00 && q[3]==0x00) {
+                    if ((size_t)(q - tbeg) >= 24) {
+                        const uint8_t* w = q - 24;
+                        if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
+                            rec.pos.x = le32s(w + 4);
+                            rec.pos.y = le32s(w + 8);
+                            rec.pos.z = le32s(w + 12);
+                            rec.pitch  = le32s(w + 16) / 256.0f;
+                            rec.yaw    = le32s(w + 20) / 256.0f;
+                            if (std::abs(rec.pos.x) < 1000000 && std::abs(rec.pos.y) < 1000000 &&
+                                std::abs(rec.pos.z) < 1000000) {
+                                rec.elevCap = 90; rec.guns = 1; gotPos = true; break;
+                            }
+                        }
+                    }
+                }
+                // Big-endian block without prefix
+                if (q[0]==0x00 && q[1]==0x5A && q[2]==0x00 && q[3]==0x00) {
+                    if ((size_t)(q - tbeg) >= 20) {
+                        const uint8_t* w = q - 20;
                         rec.pos.x = (int32_t)be32(w + 0);
                         rec.pos.y = (int32_t)be32(w + 4);
                         rec.pos.z = (int32_t)be32(w + 8);
                         rec.pitch  = (int32_t)be32(w + 12) / 256.0f;
                         rec.yaw    = (int32_t)be32(w + 16) / 256.0f;
-                        valid = true;
-                    }
-                    if (valid) {
-                        rec.elevCap = 90;
-                        rec.guns    = 1; // not used for placement
-                        gotPos = true;
+                        if (std::abs(rec.pos.x) < 1000000 && std::abs(rec.pos.y) < 1000000 &&
+                            std::abs(rec.pos.z) < 1000000) {
+                            rec.elevCap = 90; rec.guns = 1; gotPos = true; break;
+                        }
                     }
                 }
             }
