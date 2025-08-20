@@ -385,9 +385,10 @@ static void flattenSubmodelsInto(Model& dst)
                                   v.z + sm.translate.z });
         }
 
-        // 2) append textures (keep indices stable by offsetting)
+        // 2) append textures and remember if the submodel had any
         dst.textures.reserve(dst.textures.size() + src.textures.size());
         for (const auto& tex : src.textures) dst.textures.push_back(tex);
+        bool hasLocalTex = !src.textures.empty();
 
         // 3) append triangles with reindex + texture remap
         dst.tris.reserve(dst.tris.size() + src.tris.size());
@@ -397,7 +398,8 @@ static void flattenSubmodelsInto(Model& dst)
             d.v[1] = s.v[1] + (uint32_t)vBase;
             d.v[2] = s.v[2] + (uint32_t)vBase;
             if (s.hasTex) {
-                d.tex = (uint16_t)(s.tex + tBase);
+                d.tex = hasLocalTex ? (uint16_t)(s.tex + tBase)
+                                     : (uint16_t)s.tex; // already global index
                 d.hasTex = true;
             }
             dst.tris.push_back(d);
@@ -812,6 +814,22 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 }
             };
 
+            // Determine which ship texture to use for turrets
+            int turretTex = -1;
+            const char* turNames[] = {"KTUR1", "VTUR", "VTURET"};
+            for (const char* nm : turNames) {
+                for (size_t i = 0; i < M.textures.size(); ++i) {
+                    if (M.textures[i].name == nm) { turretTex = (int)i; break; }
+                }
+                if (turretTex >= 0) break;
+            }
+
+            auto remap_to_ship_tex = [&](Model& m) {
+                if (turretTex < 0) return; // nothing to remap
+                for (auto& t : m.tris) if (t.hasTex) t.tex = (uint16_t)turretTex;
+                m.textures.clear();
+            };
+
             for (size_t i = 0; i < turrets.size(); ++i) {
                 const auto& T = turrets[i];
 
@@ -830,6 +848,10 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 // Apply mount rotation
                 rotate_model(baseM, T.pitch, T.yaw);
                 rotate_model(gunM,  T.pitch, T.yaw);
+
+                // Remap textures so turrets use ship texture (KTUR1/VTUR/VTURET)
+                remap_to_ship_tex(baseM);
+                remap_to_ship_tex(gunM);
 
                 // Place base at mount (viewer verts are /256.0f)
                 glm::vec3 basePos = glm::vec3(T.pos.x/256.0f, T.pos.y/256.0f, T.pos.z/256.0f);
