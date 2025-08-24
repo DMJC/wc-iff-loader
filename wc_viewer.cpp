@@ -682,12 +682,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         };
         std::vector<TurretRec> turrets;
     
-        // Pre-scan elevation markers (LE32 0x0000005A)
-        std::vector<const uint8_t*> elevMarks;
-        for (const uint8_t* q = tbeg; q + 4 <= tend; ++q)
-            if (q[0]==0x5A && q[1]==0x00 && q[2]==0x00 && q[3]==0x00) elevMarks.push_back(q);
-
-        // Scan for "<NAME>_TRT\0<NAME>_GUN\0<WEAPON>\0"
+        // Scan for "<NAME>_TRT\0<NAME>_GUN\0<WEAPON>\0" blocks terminated by 00000001
         const uint8_t* p = tbeg;
         while (p + 16 < tend) {
             // seek zero-terminated string
@@ -699,38 +694,34 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             auto s1len = size_t(e1 - s1);
             if (s1len < 5 || s1len > 64) { ++p; continue; }
             if (!(s1len >= 4 && e1[-4]=='_' && e1[-3]=='T' && e1[-2]=='R' && e1[-1]=='T')) { ++p; continue; }
-    
+
             std::string baseModel((const char*)s1, s1len); // NAME_TRT
-    
+
             // next "<NAME>_GUN\0"
             const uint8_t* s2 = e1 + 1; if (s2 >= tend) break;
             const uint8_t* e2 = s2; while (e2 < tend && *e2 != 0) ++e2;
             if (e2 >= tend) break;
             std::string gunModel((const char*)s2, size_t(e2 - s2));
-    
+
             // next "<WEAPON>\0"
             const uint8_t* s3 = e2 + 1; if (s3 >= tend) break;
             const uint8_t* e3 = s3; while (e3 < tend && *e3 != 0) ++e3;
             if (e3 >= tend) break;
             std::string weapon((const char*)s3, size_t(e3 - s3));
-    
-            TurretRec rec; rec.baseModel = baseModel; rec.gunModel = gunModel; rec.weapon = weapon;
-                
-            // --- find nearest following elev marker and read mount XYZ ---
-            auto nearestNextElev = [&](const uint8_t* s)->const uint8_t* {
-                const uint8_t* best = nullptr;
-                for (const uint8_t* q : elevMarks) if (q > s && (!best || q < best)) best = q;
-                return best;
-            };
 
-            // After obtaining e3 (end of weapon string)
+            TurretRec rec; rec.baseModel = baseModel; rec.gunModel = gunModel; rec.weapon = weapon;
+
+            // Find 00000001 terminator following the mount block
+            const uint8_t* term = nullptr;
+            for (const uint8_t* q = e3 + 1; q + 4 <= tend; ++q) {
+                if (q[0]==0x00 && q[1]==0x00 && q[2]==0x00 && q[3]==0x01) { term = q; break; }
+            }
+
             bool gotPos = false;
-            if (!elevMarks.empty()) {
-                const uint8_t* r = nearestNextElev(e3);
-                // turret mount data lives 24 bytes before the elevation marker
-                if (r && (size_t)(r - e3) <= 512 && (r - tbeg) >= 24) {
-                    const uint8_t* w = r - 24;
-                    // Expect "SER\0" then three LE32 coords
+            if (term && (term - tbeg) >= 28) {
+                const uint8_t* r = term - 4; // expect elevation marker
+                if (r[0]==0x5A && r[1]==0x00 && r[2]==0x00 && r[3]==0x00) {
+                    const uint8_t* w = term - 28; // "SER\0" + mount data
                     if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
                         rec.pos.x = le32s(w + 4);
                         rec.pos.y = le32s(w + 8);
@@ -745,44 +736,14 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             }
 
             if (!gotPos) {
-                std::cerr << "[TURT] " << rec.baseModel << " no elev marker within 512 bytes; using (0,0,0)\n";
+                std::cerr << "[TURT] " << rec.baseModel << " invalid mount block; using (0,0,0)\n";
             }
             std::cerr << "[TURT] " << rec.baseModel << " pos=("
                       << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")"
                       << " yaw=" << rec.yaw << " pitch=" << rec.pitch << "\n";
-/*            // Some files may store guns as LE32=1; support both.
-            const size_t BACK = 128;
-            const uint8_t* preStart = (s1 > tbeg + BACK) ? (s1 - BACK) : tbeg;
-            const size_t   preLen   = size_t(s1 - preStart);
-
-            bool gotPos = false;
-            // Search from nearest to string backwards so we find the closest block
-            for (ptrdiff_t i = (ptrdiff_t)preLen - 4; i >= 0; --i) {
-                const uint8_t* r = preStart + i;
-                // Elevation marker (LE32 = 0x0000005A) appears as bytes 5A 00 00 00
-                if (i >= 12 && r[0]==0x5A && r[1]==0x00 && r[2]==0x00 && r[3]==0x00) {
-                    // Read position just before elev
-                    rec.pos.x = le32s(r - 12);
-                    rec.pos.y = le32s(r -  8);
-                    rec.pos.z = le32s(r -  4);
-
-                    // Guns can be 1 byte (0x01) or LE32(1). Accept either.
-                    bool gunsOK = false;
-                    if ((size_t)(r - preStart) + 5 <= preLen && r[4] == 0x01) gunsOK = true;          // 1-byte
-                    else if ((size_t)(r - preStart) + 8 <= preLen && le32u(r+4) == 1) gunsOK = true;  // 32-bit
-
-                    // We don't actually need guns value for placement; just record elevCap.
-                    rec.elevCap = 90;
-                    rec.guns    = 1;
-                    gotPos = true;
-                    break;
-                }
-            }
-            if (!gotPos) {
-                std::cerr << "[TURT] " << rec.baseModel << " no mount marker near strings; using (0,0,0)\n";
-            }*/
             turrets.push_back(std::move(rec));
-            p = e3 + 1; // continue after weapon
+
+            if (term) p = term + 4; else break; // continue after terminator
         }
     
         // Load turret parts and attach as submodels
