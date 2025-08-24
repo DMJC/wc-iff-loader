@@ -693,7 +693,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             const uint8_t* e1 = p;
             auto s1len = size_t(e1 - s1);
             if (s1len < 5 || s1len > 64) { ++p; continue; }
-            if (!(s1len >= 4 && e1[-4]=='_' && e1[-3]=='T' && e1[-2]=='R' && e1[-1]=='T')) { ++p; continue; }
+            if (!(s1len >= 4 && e1[-4]=='_' && (e1[-3]=='T' || e1[-3]=='U') && e1[-2]=='R' && e1[-1]=='T')) { ++p; continue; }
 
             std::string baseModel((const char*)s1, s1len); // NAME_TRT
 
@@ -718,27 +718,25 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             }
 
             bool gotPos = false;
-            if (term && (term - tbeg) >= 28) {
-                const uint8_t* r = term - 4; // expect elevation marker
-                if (r[0]==0x5A && r[1]==0x00 && r[2]==0x00 && r[3]==0x00) {
-                    const uint8_t* w = term - 28; // "SER\0" + mount data
-                    if (w[0]=='S' && w[1]=='E' && w[2]=='R' && w[3]==0) {
+            if (term && (term - tbeg) >= 32) {
+                const uint8_t* r = term - 1; // expect elevation marker
+                if ((r[0]==0x5A && r[1]==0x00 && r[2]==0x00 && r[3]==0x00) || (r[0]==0x46 && r[1]==0x00 && r[2]==0x00 && r[3]==0x00)) {
+                    const uint8_t* w = term - 25; // "SER\0" + mount data
                         rec.pos.x = le32s(w + 4);
                         rec.pos.y = le32s(w + 8);
                         rec.pos.z = le32s(w + 12);
                         rec.pitch  = le32s(w + 16) / 256.0f;
                         rec.yaw    = le32s(w + 20) / 256.0f;
-                        rec.elevCap = 90;
+                        rec.elevCap = le32s(w + 24);
                         rec.guns    = 1; // not used for placement
                         gotPos = true;
-                    }
                 }
             }
 
             if (!gotPos) {
                 std::cerr << "[TURT] " << rec.baseModel << " invalid mount block; using (0,0,0)\n";
             }
-            std::cerr << "[TURT] " << rec.baseModel << " pos=("
+            std::cerr << "[TURT] " << rec.baseModel << " " << rec.gunModel << " " << rec.weapon << " pos=("
                       << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")"
                       << " yaw=" << rec.yaw << " pitch=" << rec.pitch << "\n";
             turrets.push_back(std::move(rec));

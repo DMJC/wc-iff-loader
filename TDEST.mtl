@@ -1,0 +1,275 @@
+newmtl m_tex0
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex1
+Kd 1 1 1
+map_Kd VLT2.tga
+
+newmtl m_tex2
+Kd 1 1 1
+map_Kd VG2.tga
+
+newmtl m_tex3
+Kd 1 1 1
+map_Kd VLT1.tga
+
+newmtl m_tex4
+Kd 1 1 1
+map_Kd VG1.tga
+
+newmtl m_tex5
+Kd 1 1 1
+map_Kd TDTWR4.tga
+
+newmtl m_tex6
+Kd 1 1 1
+map_Kd VB2.tga
+
+newmtl m_tex7
+Kd 1 1 1
+map_Kd VB1.tga
+
+newmtl m_tex8
+Kd 1 1 1
+map_Kd VB3.tga
+
+newmtl m_tex9
+Kd 1 1 1
+map_Kd VG3.tga
+
+newmtl m_tex10
+Kd 1 1 1
+map_Kd VG4.tga
+
+newmtl m_tex11
+Kd 1 1 1
+map_Kd TDET9.tga
+
+newmtl m_tex12
+Kd 1 1 1
+map_Kd TDET13.tga
+
+newmtl m_tex13
+Kd 1 1 1
+map_Kd TDET8.tga
+
+newmtl m_tex14
+Kd 1 1 1
+map_Kd TDET6.tga
+
+newmtl m_tex15
+Kd 1 1 1
+map_Kd TDET12.tga
+
+newmtl m_tex16
+Kd 1 1 1
+map_Kd TDET1.tga
+
+newmtl m_tex17
+Kd 1 1 1
+map_Kd TDET10.tga
+
+newmtl m_tex18
+Kd 1 1 1
+map_Kd TDET4.tga
+
+newmtl m_tex19
+Kd 1 1 1
+map_Kd TDET7.tga
+
+newmtl m_tex20
+Kd 1 1 1
+map_Kd TDX1.tga
+
+newmtl m_tex21
+Kd 1 1 1
+map_Kd TDX2.tga
+
+newmtl m_tex22
+Kd 1 1 1
+map_Kd TDX6.tga
+
+newmtl m_tex23
+Kd 1 1 1
+map_Kd TDX5.tga
+
+newmtl m_tex24
+Kd 1 1 1
+map_Kd TDLT3.tga
+
+newmtl m_tex25
+Kd 1 1 1
+map_Kd INT1.tga
+
+newmtl m_tex26
+Kd 1 1 1
+map_Kd TDLT2.tga
+
+newmtl m_tex27
+Kd 1 1 1
+map_Kd THR1.tga
+
+newmtl m_tex28
+Kd 1 1 1
+map_Kd TDLT5.tga
+
+newmtl m_tex29
+Kd 1 1 1
+map_Kd TDTWR1.tga
+
+newmtl m_tex30
+Kd 1 1 1
+map_Kd TDHHH.tga
+
+newmtl m_tex31
+Kd 1 1 1
+map_Kd TXXX.tga
+
+newmtl m_tex32
+Kd 1 1 1
+map_Kd TDX3.tga
+
+newmtl m_tex33
+Kd 1 1 1
+map_Kd TDX4.tga
+
+newmtl m_tex34
+Kd 1 1 1
+map_Kd VG5.tga
+
+newmtl m_tex35
+Kd 1 1 1
+map_Kd TDTWR3.tga
+
+newmtl m_tex36
+Kd 1 1 1
+map_Kd TDET5.tga
+
+newmtl m_tex37
+Kd 1 1 1
+map_Kd TDET2.tga
+
+newmtl m_tex38
+Kd 1 1 1
+map_Kd TDET11.tga
+
+newmtl m_tex39
+Kd 1 1 1
+map_Kd TDET3.tga
+
+newmtl m_tex40
+Kd 1 1 1
+map_Kd TDET14.tga
+
+newmtl m_tex41
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex42
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex43
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex44
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex45
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex46
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex47
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex48
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex49
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex50
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex51
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex52
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex53
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex54
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex55
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex56
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex57
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex58
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex59
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex60
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex61
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex62
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex63
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex64
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex65
+Kd 1 1 1
+map_Kd VTURET.tga
+
+newmtl m_tex66
+Kd 1 1 1
+map_Kd TDG6.tga
+
+newmtl m_tex67
+Kd 1 1 1
+map_Kd TDG1.tga
+
+newmtl m_tex65535
+Kd 1 1 1
+
