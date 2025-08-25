@@ -739,10 +739,9 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                       << rec.pos.x << "," << rec.pos.y << "," << rec.pos.z << ")"
                       << " yaw=" << rec.yaw << " pitch=" << rec.pitch << "\n";
             turrets.push_back(std::move(rec));
-
             if (term) p = term + 4; else break; // continue after terminator
         }
-    
+	std::cerr << turrets.size() << " Turrets Found" << std::endl;
         // Load turret parts and attach as submodels
         if (!turrets.empty()) {
             // directory of the ship file
@@ -847,7 +846,7 @@ static vector<Batch> buildBatches(const Model& M){
             float u=0.f, v=0.f;
             if(t.hasTex){
                 u =  t.uv[i*2+0] * invW;
-                v =  1.0f - (t.uv[i*2+1] * invH);
+		v = t.uv[i*2+1] * invH;
             }
             vb.push_back({P.x,P.y,P.z,u,v});
         }
