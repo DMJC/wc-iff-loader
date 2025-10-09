@@ -21,6 +21,7 @@
 #include <cmath>
 #include <algorithm>
 #include <optional>
+#include <cctype>
 
 using std::string;
 using std::vector;
@@ -412,13 +413,59 @@ static void flattenSubmodelsInto(Model& dst)
     }
 }
 
+static void applyRotation(Model& m, float yawDeg, float pitchDeg, float rollDeg)
+{
+    glm::mat4 R(1.0f);
+    if (std::fabs(yawDeg)   > 1e-6f) R = glm::rotate(R, glm::radians(yawDeg),   glm::vec3(0,1,0));
+    if (std::fabs(pitchDeg) > 1e-6f) R = glm::rotate(R, glm::radians(pitchDeg), glm::vec3(1,0,0));
+    if (std::fabs(rollDeg)  > 1e-6f) R = glm::rotate(R, glm::radians(rollDeg),  glm::vec3(0,0,1));
+    for (auto& v : m.verts) {
+        glm::vec4 p(v.x, v.y, v.z, 1.0f);
+        p = R * p;
+        v.x = p.x; v.y = p.y; v.z = p.z;
+    }
+}
+
 // ----------------------------- Loader (HCl geometry + textures) -----------------------------
 static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     // Minimal IFF loader (recurses already in IFF::load)
     IFF iff; if(!iff.load(path)){ std::cerr<<"Not a REAL/FORM IFF\n"; return false; }
     M.name = stemFromPath(path);
 
-    const Chunk* CPTL = findFirst(&iff.root,"FORM","CPTL");
+    std::string baseDir = path;
+    {
+        auto pos = baseDir.find_last_of("/\\");
+        baseDir = (pos == std::string::npos) ? std::string() : baseDir.substr(0, pos + 1);
+    }
+
+    auto loadSubModel = [&](const std::string& rawName, Model& out) -> bool {
+        if (rawName.empty()) return false;
+        std::vector<std::string> candidates;
+        auto addCandidate = [&](std::string name) {
+            if (name.empty()) return;
+            if (std::find(candidates.begin(), candidates.end(), name) == candidates.end()) {
+                candidates.push_back(std::move(name));
+            }
+        };
+        addCandidate(rawName);
+        std::string upper = rawName;
+        std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c){ return (char)std::toupper(c); });
+        addCandidate(upper);
+        std::string lower = rawName;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+        addCandidate(lower);
+
+        for (const auto& candidate : candidates) {
+            std::string file = baseDir + candidate + ".IFF";
+            if (file == path) continue; // avoid immediate self-recursion
+            std::ifstream f(file, std::ios::binary);
+            if (!f) continue;
+            f.close();
+            if (load_wc3_model_hcl_textured(file, out)) return true;
+        }
+        return false;
+    };
+
     const Chunk* TURT = findFirst(&iff.root,"TURT");
     const Chunk* VERT = findFirst(&iff.root,"VERT");
     const Chunk* TRIS = findFirst(&iff.root,"FORM","TRIS");
@@ -741,52 +788,27 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             turrets.push_back(std::move(rec));
             if (term) p = term + 4; else break; // continue after terminator
         }
-	std::cerr << turrets.size() << " Turrets Found" << std::endl;
+        std::cerr << turrets.size() << " Turrets Found" << std::endl;
         // Load turret parts and attach as submodels
         if (!turrets.empty()) {
-            // directory of the ship file
-            std::string dir = path;
-            {
-                auto pos = dir.find_last_of("/\\");
-                dir = (pos == std::string::npos) ? std::string() : dir.substr(0, pos+1);
-            }
-    
-            auto load_part = [&](const std::string& nameNoExt, Model& out)->bool {
-                std::string file = dir + nameNoExt + ".IFF";
-                return load_wc3_model_hcl_textured(file, out); // recursive use is OK
-            };
-    
-            auto rotate_model = [](Model& m, float pitchDeg, float yawDeg) {
-                float yawRad   = glm::radians(yawDeg);
-                float pitchRad = glm::radians(pitchDeg);
-                glm::mat4 R(1.0f);
-                R = glm::rotate(R, yawRad,   glm::vec3(0,1,0));
-                R = glm::rotate(R, pitchRad, glm::vec3(1,0,0));
-                for (auto& v : m.verts) {
-                    glm::vec4 p(v.x, v.y, v.z, 1.0f);
-                    p = R * p;
-                    v.x = p.x; v.y = p.y; v.z = p.z;
-                }
-            };
-
             for (size_t i = 0; i < turrets.size(); ++i) {
                 const auto& T = turrets[i];
 
                 // Base
                 Model baseM;
-                if (!load_part(T.baseModel, baseM)) {
+                if (!loadSubModel(T.baseModel, baseM)) {
                     std::cerr << "[TURT] Missing " << T.baseModel << ".IFF\n";
                 }
 
                 // Gun
                 Model gunM;
-                if (!load_part(T.gunModel, gunM)) {
+                if (!loadSubModel(T.gunModel, gunM)) {
                     std::cerr << "[TURT] Missing " << T.gunModel << ".IFF\n";
                 }
 
                 // Apply mount rotation
-                rotate_model(baseM, T.pitch, T.yaw);
-                rotate_model(gunM,  T.pitch, T.yaw);
+                applyRotation(baseM, T.yaw, T.pitch, 0.0f);
+                applyRotation(gunM,  T.yaw, T.pitch, 0.0f);
 
                 // Place base at mount (viewer verts are /256.0f)
                 glm::vec3 basePos = glm::vec3(T.pos.x/256.0f, T.pos.y/256.0f, T.pos.z/256.0f);
@@ -814,10 +836,169 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 std::cerr << "[TURT] " << T.baseModel << " pos=("
                           << T.pos.x << "," << T.pos.y << "," << T.pos.z << ")"
                           << " yaw=" << T.yaw << " pitch=" << T.pitch << "\n";
-                flattenSubmodelsInto(M);
             }
         }
     }
+
+    if (const Chunk* APPR = findFirst(&iff.root, "FORM", "APPR")) {
+        if (const Chunk* POLY = findFirst(APPR, "FORM", "POLY")) {
+            if (const Chunk* SUPR = childOf(POLY, "SUPR")) {
+                const uint8_t* suprData = &iff.buf[SUPR->start + 8];
+                uint32_t suprSize = be32(&iff.buf[SUPR->start + 4]);
+                if (suprSize < 3) {
+                    std::cerr << "[SUPR] payload too small (" << suprSize << ")\n";
+                } else {
+                    uint16_t entryIndex = le16u(suprData + 0);
+                    size_t nameOffset = 2;
+                    size_t nameLen = 0;
+                    while (nameOffset + nameLen < suprSize && suprData[nameOffset + nameLen] != 0) {
+                        ++nameLen;
+                    }
+                    std::string hangarName;
+                    if (nameLen > 0) {
+                        hangarName.assign(reinterpret_cast<const char*>(suprData + nameOffset), nameLen);
+                        while (!hangarName.empty() && hangarName.back() == ' ') hangarName.pop_back();
+                    }
+                    size_t tailStart = nameOffset + nameLen;
+                    if (tailStart < suprSize && suprData[tailStart] == 0) ++tailStart;
+                    int32_t parentIndex = -1;
+                    if (tailStart < suprSize) {
+                        size_t remain = suprSize - tailStart;
+                        if (remain >= 4) {
+                            parentIndex = le32s(suprData + tailStart);
+                        } else if (remain == 3) {
+                            uint32_t raw = uint32_t(suprData[tailStart + 0]) |
+                                           (uint32_t(suprData[tailStart + 1]) << 8) |
+                                           (uint32_t(suprData[tailStart + 2]) << 16);
+                            if (raw & 0x800000) raw |= 0xFF000000u;
+                            parentIndex = (int32_t)raw;
+                        } else if (remain == 2) {
+                            parentIndex = (int32_t)(int16_t)le16u(suprData + tailStart);
+                        } else if (remain == 1) {
+                            parentIndex = (int32_t)(int8_t)suprData[tailStart];
+                        }
+                    }
+
+                    if (!hangarName.empty()) {
+                        Model hangarModel;
+                        if (!loadSubModel(hangarName, hangarModel)) {
+                            std::cerr << "[SUPR] Missing hangar IFF " << hangarName << ".IFF\n";
+                        } else {
+                            std::string subName = "hangar_" + hangarName;
+                            M.submodels.push_back(SubModel{
+                                subName,
+                                hangarName,
+                                glm::vec3(0.0f),
+                                std::move(hangarModel),
+                                -1
+                            });
+                            std::cerr << "[SUPR] hangar=" << hangarName
+                                      << " entry=" << entryIndex
+                                      << " parent=" << parentIndex
+                                      << "\n";
+                        }
+                    } else {
+                        std::cerr << "[SUPR] empty hangar name\n";
+                    }
+                }
+            }
+        }
+    }
+
+    if (const Chunk* CRGO = findFirst(&iff.root, "CRGO")) {
+        const uint8_t* cargoData = &iff.buf[CRGO->start + 8];
+        uint32_t cargoSize = be32(&iff.buf[CRGO->start + 4]);
+        const size_t entrySize = 37;
+        size_t entryCount = cargoSize / entrySize;
+        if (cargoSize % entrySize != 0) {
+            std::cerr << "[CRGO] payload size " << cargoSize << " not aligned to " << entrySize << "\n";
+        }
+        auto normalizeDegrees = [](float deg) {
+            if (!std::isfinite(deg)) return 0.0f;
+            deg = std::fmod(deg, 360.0f);
+            if (deg > 180.0f) deg -= 360.0f;
+            if (deg < -180.0f) deg += 360.0f;
+            return deg;
+        };
+        struct CargoRec {
+            std::string name;
+            glm::vec3   shipPosition{0.0f}; // decoded ship-space placement (X/Z 16.16, Y 8.8)
+            float       yawDeg = 0.0f;
+            float       pitchDeg = 0.0f;
+            float       rollDeg = 0.0f;
+            int16_t     sentinel = 0;
+            int32_t     rawYaw = 0;
+            int32_t     rawX = 0;
+            int32_t     rawY = 0;
+            int32_t     rawZ = 0;
+        };
+        std::vector<CargoRec> cargos;
+        cargos.reserve(entryCount);
+        for (size_t i = 0; i < entryCount; ++i) {
+            const uint8_t* e = cargoData + i * entrySize;
+            size_t len = 0;
+            while (len < 16 && e[len] != 0) ++len;
+            std::string name((const char*)e, len);
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            int32_t rawX     = le32s(e + 16);
+            int32_t rawY     = le32s(e + 20);
+            int32_t rawZ     = le32s(e + 24);
+            int32_t rawYaw   = le32s(e + 28);
+            int8_t  rawRoll  = (int8_t)e[32];
+            int16_t rawPitch = (int16_t)le16u(e + 33);
+            int16_t sentinel = (int16_t)le16u(e + 35);
+            if (!name.empty()) {
+                CargoRec rec;
+                rec.name = std::move(name);
+                rec.rawX = rawX;
+                rec.rawY = rawY;
+                rec.rawZ = rawZ;
+                rec.rawYaw = rawYaw;
+                rec.shipPosition = glm::vec3(
+                    rawX / 65536.0f,
+                    rawY / 256.0f,
+                    rawZ / 65536.0f
+                );
+                rec.yawDeg   = normalizeDegrees(rawYaw / 65536.0f);
+                rec.pitchDeg = rawPitch / 256.0f;
+                rec.rollDeg  = static_cast<float>(rawRoll);
+                rec.sentinel = sentinel;
+                cargos.push_back(rec);
+            }
+        }
+        if (!cargos.empty()) {
+            std::cerr << "[CRGO] " << cargos.size() << " cargo mounts\n";
+        }
+        for (size_t i = 0; i < cargos.size(); ++i) {
+            const auto& C = cargos[i];
+            Model cargoModel;
+            if (!loadSubModel(C.name, cargoModel)) {
+                std::cerr << "[CRGO] Missing " << C.name << ".IFF\n";
+                continue;
+            }
+            applyRotation(cargoModel, C.yawDeg, C.pitchDeg, C.rollDeg);
+            glm::vec3 pos = C.shipPosition;
+            std::string subName = "cargo_" + std::to_string(i) + "_" + C.name;
+            M.submodels.push_back(SubModel{
+                subName,
+                C.name,
+                pos,
+                std::move(cargoModel),
+                -1
+            });
+            std::cerr << "[CRGO] " << C.name
+                      << " posRaw=(" << C.rawX << "," << C.rawY << "," << C.rawZ << ")"
+                      << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
+                      << " yawRaw=" << C.rawYaw
+                      << " yaw=" << C.yawDeg
+                      << " pitch=" << C.pitchDeg
+                      << " roll=" << C.rollDeg
+                      << " flag=" << C.sentinel
+                      << "\n";
+        }
+    }
+
+    flattenSubmodelsInto(M);
     return true;
 }
 
@@ -1117,6 +1298,7 @@ int main(int argc, char** argv){
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
     // Upload textures (+ fallback white)
     for(auto& T : M.textures) uploadTexture(T);
@@ -1183,6 +1365,7 @@ int main(int argc, char** argv){
 
     // Simple orbit camera + bbox
     bool drawBox=true;
+    bool wireframe=false;
     uint32_t last = SDL_GetTicks();
     float t=0.f; int winW=1280, winH=800;
 
@@ -1211,6 +1394,10 @@ int main(int argc, char** argv){
                     glBindTexture(GL_TEXTURE_2D, 0);
                 }
                 if(sc==SDL_SCANCODE_B){ drawBox = !drawBox; }
+                if(sc==SDL_SCANCODE_W){
+                    wireframe = !wireframe;
+                    glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
+                }
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                rotating = true;
