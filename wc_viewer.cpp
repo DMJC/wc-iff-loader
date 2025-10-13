@@ -23,6 +23,17 @@
 #include <optional>
 #include <cctype>
 
+#if defined(__has_include)
+#  if __has_include(<openvr.h>)
+#    define WC_HAVE_OPENVR 1
+#    include <openvr.h>
+#  else
+#    define WC_HAVE_OPENVR 0
+#  endif
+#else
+#  define WC_HAVE_OPENVR 0
+#endif
+
 using std::string;
 using std::vector;
 
@@ -1221,6 +1232,176 @@ static Mat4 scale1(float s){
     return M;
 }
 
+static Mat4 invertRigid(const Mat4& M){
+    Mat4 R = Mat4::identity();
+    float r00 = M.m[0],  r01 = M.m[4],  r02 = M.m[8];
+    float r10 = M.m[1],  r11 = M.m[5],  r12 = M.m[9];
+    float r20 = M.m[2],  r21 = M.m[6],  r22 = M.m[10];
+    float tx  = M.m[12], ty  = M.m[13], tz  = M.m[14];
+
+    // Transpose rotation
+    R.m[0] = r00; R.m[1] = r01; R.m[2] = r02;
+    R.m[4] = r10; R.m[5] = r11; R.m[6] = r12;
+    R.m[8] = r20; R.m[9] = r21; R.m[10] = r22;
+
+    // Inverted translation
+    R.m[12] = -(r00 * tx + r10 * ty + r20 * tz);
+    R.m[13] = -(r01 * tx + r11 * ty + r21 * tz);
+    R.m[14] = -(r02 * tx + r12 * ty + r22 * tz);
+    return R;
+}
+
+#if WC_HAVE_OPENVR
+static Mat4 fromHmdMatrix34(const vr::HmdMatrix34_t& mat){
+    Mat4 M = Mat4::identity();
+    for(int r=0;r<3;r++){
+        for(int c=0;c<4;c++){
+            M.m[c*4 + r] = mat.m[r][c];
+        }
+    }
+    return M;
+}
+
+static Mat4 fromHmdMatrix44(const vr::HmdMatrix44_t& mat){
+    Mat4 M = Mat4::identity();
+    for(int r=0;r<4;r++){
+        for(int c=0;c<4;c++){
+            M.m[c*4 + r] = mat.m[r][c];
+        }
+    }
+    return M;
+}
+
+struct VRContext {
+    vr::IVRSystem* system = nullptr;
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+    Mat4 eyeProj[2];
+    Mat4 eyeToHead[2];
+    Mat4 hmdPose = Mat4::identity();
+    GLuint eyeFBO[2]{};
+    GLuint eyeColor[2]{};
+    GLuint eyeDepth[2]{};
+    uint32_t eyeWidth = 0;
+    uint32_t eyeHeight = 0;
+
+    bool init(){
+        vr::EVRInitError err = vr::VRInitError_None;
+        system = vr::VR_Init(&err, vr::VRApplication_Scene);
+        if(err != vr::VRInitError_None){
+            std::cerr << "[vr] SteamVR init failed: " << vr::VR_GetVRInitErrorAsEnglishDescription(err) << "\n";
+            system = nullptr;
+            return false;
+        }
+        if(!vr::VRCompositor()){
+            std::cerr << "[vr] No VR compositor available\n";
+            vr::VR_Shutdown();
+            system = nullptr;
+            return false;
+        }
+        system->GetRecommendedRenderTargetSize(eyeWidth, eyeHeight);
+        updateEyeData();
+        if(!createTargets()){
+            shutdown();
+            return false;
+        }
+        return true;
+    }
+
+    void shutdown(){
+        destroyTargets();
+        if(system){
+            vr::VR_Shutdown();
+            system = nullptr;
+        }
+    }
+
+    void updateEyeData(){
+        if(!system) return;
+        for(int eye=0; eye<2; ++eye){
+            eyeProj[eye] = fromHmdMatrix44(system->GetProjectionMatrix(static_cast<vr::Hmd_Eye>(eye), 0.05f, 100.0f));
+            eyeToHead[eye] = fromHmdMatrix34(system->GetEyeToHeadTransform(static_cast<vr::Hmd_Eye>(eye)));
+        }
+    }
+
+    bool beginFrame(){
+        if(!system) return false;
+        vr::VRCompositor()->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+        if(poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid){
+            hmdPose = fromHmdMatrix34(poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
+        }else{
+            hmdPose = Mat4::identity();
+        }
+        return true;
+    }
+
+    Mat4 viewForEye(int eyeIndex, const Mat4& baseView) const{
+        Mat4 headInv = invertRigid(hmdPose);
+        Mat4 eyeInv = invertRigid(eyeToHead[eyeIndex]);
+        return mul(eyeInv, mul(headInv, baseView));
+    }
+
+    const Mat4& projectionForEye(int eyeIndex) const{ return eyeProj[eyeIndex]; }
+
+    void submit(){
+        for(int eye=0; eye<2; ++eye){
+            vr::Texture_t tex{};
+            tex.handle = reinterpret_cast<void*>(static_cast<uintptr_t>(eyeColor[eye]));
+            tex.eType = vr::TextureType_OpenGL;
+            tex.eColorSpace = vr::ColorSpace_Gamma;
+            vr::VRCompositor()->Submit(static_cast<vr::Hmd_Eye>(eye), &tex);
+        }
+        vr::VRCompositor()->PostPresentHandoff();
+    }
+
+private:
+    bool createTargets(){
+        glGenFramebuffers(2, eyeFBO);
+        glGenTextures(2, eyeColor);
+        glGenRenderbuffers(2, eyeDepth);
+        for(int eye=0; eye<2; ++eye){
+            glBindTexture(GL_TEXTURE_2D, eyeColor[eye]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, eyeWidth, eyeHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+            glBindFramebuffer(GL_FRAMEBUFFER, eyeFBO[eye]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, eyeColor[eye], 0);
+
+            glBindRenderbuffer(GL_RENDERBUFFER, eyeDepth[eye]);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, eyeWidth, eyeHeight);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, eyeDepth[eye]);
+
+            GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if(status != GL_FRAMEBUFFER_COMPLETE){
+                std::cerr << "[vr] framebuffer incomplete for eye " << eye << " status=" << std::hex << status << std::dec << "\n";
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                return false;
+            }
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return true;
+    }
+
+    void destroyTargets(){
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteFramebuffers(2, eyeFBO);
+        glDeleteTextures(2, eyeColor);
+        glDeleteRenderbuffers(2, eyeDepth);
+        for(int eye=0; eye<2; ++eye){
+            eyeFBO[eye] = eyeColor[eye] = eyeDepth[eye] = 0;
+        }
+    }
+};
+#endif
+
 static void drawBBox(const Vec3& bmin, const Vec3& bmax, GLuint prog, GLint uMVP, const Mat4& MVP, const std::array<float,3>& color){
     struct BBoxVertex{ float x,y,z,r,g,b; };
     const unsigned idx[]={0,1,1,2,2,3,3,0, 4,5,5,6,6,7,7,4, 0,4,1,5,2,6,3,7};
@@ -1258,21 +1439,29 @@ static void drawBBox(const Vec3& bmin, const Vec3& bmax, GLuint prog, GLint uMVP
 // ----------------------------- main -----------------------------
 int main(int argc, char** argv){
     if(argc<2){
-        std::cerr<<"Usage: "<<argv[0]<<" FILE.IFF [--out BASE] [--export] [--export-only] [--no-fit]\n";
+        std::cerr<<"Usage: "<<argv[0]<<" FILE.IFF [--out BASE] [--export] [--export-only] [--no-fit] [--vr]\n";
         return 1;
     }
     string path = argv[1];
     string outBase = stemFromPath(path);
 
     // Parse flags up-front so palette is ready BEFORE decoding textures
-    bool exportOnStart=false; bool exportOnly=false; bool noFit=false;
+    bool exportOnStart=false; bool exportOnly=false; bool noFit=false; bool useVR=false;
     for(int i=2;i<argc;i++){
         string a=argv[i];
         if(a=="--out" && i+1<argc) outBase = argv[++i];
         else if(a=="--export") exportOnStart = true;
         else if(a=="--export-only") exportOnly = true;
         else if(a=="--no-fit") noFit = true;
+        else if(a=="--vr") useVR = true;
     }
+
+#if !WC_HAVE_OPENVR
+    if(useVR){
+        std::cerr << "[vr] SteamVR support not available in this build\n";
+        return 4;
+    }
+#endif
 
     std::vector<std::string> paletteFiles = {"wc3pal.json","wc4pal.json","armpal.json"};
     std::vector<std::array<std::array<uint8_t,3>,256>> loadedPalettes;
@@ -1312,11 +1501,30 @@ int main(int argc, char** argv){
         SDL_WINDOW_OPENGL|SDL_WINDOW_RESIZABLE);
     SDL_GLContext glc = SDL_GL_CreateContext(win);
     glewExperimental=GL_TRUE; glewInit();
+#if WC_HAVE_OPENVR
+    VRContext vr;
+    if(useVR){
+        if(!vr.init()){
+            std::cerr << "[vr] initialization failed, continuing without VR\n";
+            useVR = false;
+        }
+    }
+#endif
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    
+
+    auto shutdownAndExit = [&](int code){
+#if WC_HAVE_OPENVR
+        if(useVR) vr.shutdown();
+#endif
+        SDL_GL_DeleteContext(glc);
+        SDL_DestroyWindow(win);
+        SDL_Quit();
+        return code;
+    };
+
     // Upload textures (+ fallback white)
     for(auto& T : M.textures) uploadTexture(T);
     Texture white; white.w=1; white.h=1; white.rgba={255,255,255,255}; uploadTexture(white);
@@ -1433,16 +1641,65 @@ int main(int argc, char** argv){
     uint32_t last = SDL_GetTicks();
     float t=0.f; int winW=1280, winH=800;
 
+    auto renderBatches = [&](const Mat4& MVP){
+        glUseProgram(prog);
+        glUniformMatrix4fv(uMVP,1,GL_FALSE,MVP.m);
+        glUniform1i(uTex, 0);
+
+        for(const auto& b : batches){
+            GLuint tex = (b.tex==65535) ? white.gl :
+                         (b.tex<M.textures.size() && M.textures[b.tex].gl ? M.textures[b.tex].gl : white.gl);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glBindVertexArray(b.vao);
+            glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
+        }
+        glBindVertexArray(0);
+
+        if(drawBox){
+            drawBBox(bmin, bmax, axisProg, axisUMVP, MVP, std::array<float,3>{1.f, 1.f, 0.f});
+            glUseProgram(prog);
+        }
+    };
+
+    auto renderAxisOverlay = [&](const Mat4& view){
+        if(!showAxis) return;
+        GLint prevViewport[4];
+        glGetIntegerv(GL_VIEWPORT, prevViewport);
+        int axisBase = std::min(winW, winH);
+        int axisSize = std::max(80, axisBase / 5);
+        axisSize = std::min(axisSize, axisBase);
+        glViewport(0, 0, axisSize, axisSize);
+        glDisable(GL_DEPTH_TEST);
+
+        Mat4 axisRot = view;
+        axisRot.m[12] = axisRot.m[13] = axisRot.m[14] = 0.0f;
+        Mat4 axisProj = perspective(0.7f, 1.0f, 0.01f, 10.0f);
+        Mat4 axisMV = mul(translate(0.0f, 0.0f, -1.5f), axisRot);
+        Mat4 axisMVP = mul(axisProj, axisMV);
+
+        glUseProgram(axisProg);
+        glUniformMatrix4fv(axisUMVP, 1, GL_FALSE, axisMVP.m);
+        glBindVertexArray(axisVAO);
+        glLineWidth(2.0f);
+        glDrawArrays(GL_LINES, 0, axisVertCount);
+        glLineWidth(1.0f);
+        glBindVertexArray(0);
+        glEnable(GL_DEPTH_TEST);
+        glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+        glUseProgram(prog);
+    };
+
     while(true){
         SDL_Event e;
         while(SDL_PollEvent(&e)){
-            if(e.type==SDL_QUIT) { SDL_GL_DeleteContext(glc); SDL_DestroyWindow(win); SDL_Quit(); return 0; }
+            if(e.type==SDL_QUIT) { return shutdownAndExit(0); }
             if(e.type==SDL_WINDOWEVENT && e.window.event==SDL_WINDOWEVENT_SIZE_CHANGED){
                 winW = e.window.data1; winH = e.window.data2; glViewport(0,0,winW,winH);
             }
             if(e.type==SDL_KEYDOWN){
                 SDL_Scancode sc = e.key.keysym.scancode;
-                if(sc==SDL_SCANCODE_ESCAPE) { SDL_GL_DeleteContext(glc); SDL_DestroyWindow(win); SDL_Quit(); return 0; }
+                if(sc==SDL_SCANCODE_ESCAPE) { return shutdownAndExit(0); }
                 if(sc==SDL_SCANCODE_O || sc==SDL_SCANCODE_E){ std::cerr<<"[export] key -> OBJ/MTL/TGA\n"; exportOBJ(M, outBase); }
                 if(sc==SDL_SCANCODE_P){
                     currentPalette = (currentPalette + 1) % loadedPalettes.size();
@@ -1496,12 +1753,6 @@ int main(int argc, char** argv){
 
         uint32_t now = SDL_GetTicks(); float dt=(now-last)*0.001f; last=now; t+=dt;
 
-        glClearColor(0.08f,0.08f,0.10f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-
-        float aspect = (float)winW/std::max(1,winH);
-        float fovy = 1.0f; // ~57 deg
-        Mat4 P = perspective(fovy, aspect, 0.05f, 100.0f);
-
         // Orbit camera from yaw/pitch/distance, targeting origin
         float cp = std::cos(pitch), sp = std::sin(pitch);
         float cy = std::cos(yaw),   sy = std::sin(yaw);
@@ -1513,50 +1764,45 @@ int main(int argc, char** argv){
         // Model matrix: translate to origin then scale to fit
         Mat4 Mdl = noFit ? translate(0,0,0) : mul(scale1(fitScale), translate(-center.x, -center.y, -center.z));
 
-        Mat4 MVP = mul(P, mul(V, Mdl));
-        glUseProgram(prog);
-        glUniformMatrix4fv(uMVP,1,GL_FALSE,MVP.m);
-        glUniform1i(uTex, 0);
-
-        // draw each texture bucket
-        for(const auto& b : batches){
-            GLuint tex = (b.tex==65535) ? white.gl :
-                         (b.tex<M.textures.size() && M.textures[b.tex].gl ? M.textures[b.tex].gl : white.gl);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glBindVertexArray(b.vao);
-            glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
-        }
-        glBindVertexArray(0);
-
-        if(drawBox) drawBBox(bmin, bmax, axisProg, axisUMVP, MVP, std::array<float,3>{1.f, 1.f, 0.f});
-        
-        if(showAxis){
-            GLint prevViewport[4];
-            glGetIntegerv(GL_VIEWPORT, prevViewport);
-            int axisBase = std::min(winW, winH);
-            int axisSize = std::max(80, axisBase / 5);
-            axisSize = std::min(axisSize, axisBase);
-            glViewport(0, 0, axisSize, axisSize);
-            glDisable(GL_DEPTH_TEST);
-
-            Mat4 axisRot = V;
-            axisRot.m[12] = axisRot.m[13] = axisRot.m[14] = 0.0f;
-            Mat4 axisProj = perspective(0.7f, 1.0f, 0.01f, 10.0f);
-            Mat4 axisMV = mul(translate(0.0f, 0.0f, -1.5f), axisRot);
-            Mat4 axisMVP = mul(axisProj, axisMV);
-
-            glUseProgram(axisProg);
-            glUniformMatrix4fv(axisUMVP, 1, GL_FALSE, axisMVP.m);
-            glBindVertexArray(axisVAO);
-            glLineWidth(2.0f);
-            glDrawArrays(GL_LINES, 0, axisVertCount);
-            glLineWidth(1.0f);
-            glBindVertexArray(0);
+        #if WC_HAVE_OPENVR
+        if(useVR){
+            vr.beginFrame();
+            for(int eye=0; eye<2; ++eye){
+                glBindFramebuffer(GL_FRAMEBUFFER, vr.eyeFBO[eye]);
+                glViewport(0, 0, vr.eyeWidth, vr.eyeHeight);
+                glClearColor(0.08f,0.08f,0.10f,1);
+                glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+                Mat4 eyeView = vr.viewForEye(eye, V);
+                Mat4 MVP = mul(vr.projectionForEye(eye), mul(eyeView, Mdl));
+                renderBatches(MVP);
+            }
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0,0,winW,winH);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, vr.eyeFBO[0]);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+            glBlitFramebuffer(0,0,vr.eyeWidth,vr.eyeHeight, 0,0, winW, winH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glEnable(GL_DEPTH_TEST);
-            glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
-            glUseProgram(prog);
+            vr.submit();
+            SDL_GL_SwapWindow(win);
+            continue;
         }
+        #endif
+
+        float aspect = (float)winW/std::max(1,winH);
+        float fovy = 1.0f; // ~57 deg
+        Mat4 P = perspective(fovy, aspect, 0.05f, 100.0f);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0,0,winW,winH);
+        glClearColor(0.08f,0.08f,0.10f,1);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
+
+        Mat4 MVP = mul(P, mul(V, Mdl));
+        renderBatches(MVP);
+        renderAxisOverlay(V);
         SDL_GL_SwapWindow(win);
     }
+    return shutdownAndExit(0);
 }
