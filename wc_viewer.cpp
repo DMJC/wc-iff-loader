@@ -1298,7 +1298,7 @@ struct VRContext {
             system = nullptr;
             return false;
         }
-        system->GetRecommendedRenderTargetSize(eyeWidth, eyeHeight);
+        system->GetRecommendedRenderTargetSize(&eyeWidth, &eyeHeight);
         updateEyeData();
         if(!createTargets()){
             shutdown();
