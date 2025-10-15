@@ -23,18 +23,18 @@ ToDo:
 - Cleanup camera controls
 
 Controls:
-Up Arrow - Pitch Up
-Down Arrow - Pitch Down
-Left Arrow - Pan Left
-Right Arrow - Pan Right
-Numpad Left - Truck Left
-Numpad Right - Truck Right
-Numpad Up - Jib Up
-Numpad Down - Jib Down
-A - Zoom In
-Z - Zoom Out
-X - Toggle Axis On/Off
-R - Resets View
-I - Targetting Reticle
-B - Toggle Bounding Box On/Off
-O - Export to Obj file/Export Textures to .TGA.
+- Up Arrow - Pitch Up
+- Down Arrow - Pitch Down
+- Left Arrow - Pan Left
+- Right Arrow - Pan Right
+- Numpad Left - Truck Left
+- Numpad Right - Truck Right
+- Numpad Up - Jib Up
+- Numpad Down - Jib Down
+- A - Zoom In
+- Z - Zoom Out
+- X - Toggle Axis On/Off
+- R - Resets View
+- I - Targetting Reticle
+- B - Toggle Bounding Box On/Off
+- O - Export to Obj file/Export Textures to .TGA.
