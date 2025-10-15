@@ -3,6 +3,12 @@ Wing Commander IFF Loader
 
 Based on Mario HCL's IFF web viewer and libRealspace.
 
+Build Dependencies:
+- libSDL2
+- libGLEW
+- libGL (opengl32 on Windows)
+- libopenvr (for optional VR support)
+
 Supports:
 - Export of Turrets/Hangars/Ships to Lightwave .OBJ files with .MTL Materials.
 - Export of Textures to .tga format.
