@@ -38,3 +38,6 @@ Controls:
 - I - Targetting Reticle
 - B - Toggle Bounding Box On/Off
 - O - Export to Obj file/Export Textures to .TGA.
+
+Screenshot:
+<img width="1276" height="836" alt="image" src="https://github.com/user-attachments/assets/a2563675-512b-4036-9b85-f2a595fa43bf" />
