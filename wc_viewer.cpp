@@ -51,6 +51,23 @@ static std::string stemFromPath(const std::string& p){
 }
 
 struct Vec3{ float x=0,y=0,z=0; };
+static Vec3 vecAdd(const Vec3& a, const Vec3& b) { return Vec3{ a.x + b.x, a.y + b.y, a.z + b.z }; }
+static Vec3 vecScale(const Vec3& v, float s) { return Vec3{ v.x * s, v.y * s, v.z * s }; }
+static float vecLength(const Vec3& v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+static Vec3 vecNormalize(const Vec3& v) { float l = vecLength(v); if (l <= 1e-6f) return Vec3{ 0,0,0 }; return Vec3{ v.x / l, v.y / l, v.z / l }; }
+static Vec3 vecCross(const Vec3& a, const Vec3& b) {
+    return Vec3{
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    };
+}
+static bool isBackOrFrontLabel(const std::string& name) {
+    if (name.empty()) return false;
+    std::string upper = name;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+    return upper == "BACK" || upper == "FRONT" || upper == "BMD9" || upper == "BSD1" || upper == "BMDX5";
+}
 struct Tri{
     uint32_t v[3]{};
     uint16_t tex=0;       // texture index
@@ -63,6 +80,7 @@ struct Texture{
     vector<uint8_t> idx;  // original palette indices
     GLuint gl=0;
     std::string name;     // TXMP name (up to 8 chars)
+    bool skipRender = false; // true when texture should not be rendered
     bool valid() const { return w>0 && h>0 && rgba.size()==(size_t)w*h*4; }
 };
 
@@ -688,19 +706,23 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     M.textures.clear();
     if(TXMS){
         size_t ok=0, rawCnt=0, rleCnt=0, total=0;
-        for(const auto& ch : TXMS->children){
-            if(ch.id != "TXMP") continue;
+        for (const auto& ch : TXMS->children) {
+            if (ch.id != "TXMP") continue;
             ++total;
             const uint8_t* p = &iff.buf[ch.payload];
             size_t len = ch.size;
-            int w=0,h=0; vector<uint8_t> rgba, idx;
+            int w = 0, h = 0; vector<uint8_t> rgba, idx;
             Texture T;
-            if(len >= 8){
+            if (len >= 8) {
                 char nbuf[9];
                 std::memcpy(nbuf, p, 8);
                 nbuf[8] = 0;
                 T.name = nbuf;
-                while(!T.name.empty() && (T.name.back() == '\0' || T.name.back() == ' ')) T.name.pop_back();
+                while (!T.name.empty() && (T.name.back() == '\0' || T.name.back() == ' ')) T.name.pop_back();
+                if (isBackOrFrontLabel(T.name)) {
+                    T.skipRender = true;
+                    std::cerr << "[tex] suppress " << T.name << " (BACK/FRONT)\n";
+                }
             }
             if(decode_TXMP_WC3(p, len, w, h, idx, rgba)){
                 if(12 + (size_t)w*h == len) ++rawCnt; else ++rleCnt;
@@ -1023,7 +1045,16 @@ static vector<Batch> buildBatches(const Model& M){
     std::unordered_map<uint16_t, vector<uint32_t>> ibPerTex;
 
     for(const auto& t: M.tris){
-        uint16_t tx = (t.tex < M.textures.size() && M.textures[t.tex].valid()) ? t.tex : uint16_t(65535);
+        uint16_t tx = 65535;
+        if (t.hasTex && t.tex < M.textures.size()) {
+            const Texture& tex = M.textures[t.tex];
+            if (tex.skipRender) {
+                continue; // omit BACK/FRONT polygons entirely
+            }
+            if (tex.valid()) {
+                tx = t.tex;
+            }
+        }
         auto& vb = vbPerTex[tx];
         auto& ib = ibPerTex[tx];
 
@@ -1526,7 +1557,10 @@ int main(int argc, char** argv){
     };
 
     // Upload textures (+ fallback white)
-    for(auto& T : M.textures) uploadTexture(T);
+    for (auto& T : M.textures) {
+        if (T.skipRender) continue;
+        uploadTexture(T);
+    }
     Texture white; white.w=1; white.h=1; white.rgba={255,255,255,255}; uploadTexture(white);
 
     // Build batches
@@ -1605,6 +1639,51 @@ int main(int argc, char** argv){
     glBindVertexArray(0);
     const GLsizei axisVertCount = (GLsizei)(sizeof(axisVerts)/sizeof(axisVerts[0]));
 
+    const char* reticleVS =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 aPos;\n"
+        "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+    const char* reticleFS =
+        "#version 330 core\n"
+        "uniform vec3 uColor; out vec4 o;\n"
+        "void main(){ o = vec4(uColor, 1.0); }\n";
+    GLuint reticleProg = makeProgram(reticleVS, reticleFS);
+    GLint reticleColorLoc = glGetUniformLocation(reticleProg, "uColor");
+
+    std::vector<float> reticleCircle;
+    const int circleSegments = 64;
+    const float reticleRadius = 0.04f;
+    const float pi = 3.14159265358979323846f;
+    for (int i = 0;i < circleSegments;i++) {
+        float angle = (float)i / (float)circleSegments * 2.0f * pi;
+        reticleCircle.push_back(std::cos(angle) * reticleRadius);
+        reticleCircle.push_back(std::sin(angle) * reticleRadius);
+    }
+    const GLsizei reticleCircleCount = (GLsizei)(reticleCircle.size() / 2);
+    GLuint reticleCircleVAO = 0, reticleCircleVBO = 0;
+    glGenVertexArrays(1, &reticleCircleVAO);
+    glGenBuffers(1, &reticleCircleVBO);
+    glBindVertexArray(reticleCircleVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, reticleCircleVBO);
+    glBufferData(GL_ARRAY_BUFFER, reticleCircle.size() * sizeof(float), reticleCircle.data(), GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+
+    const float crossHalf = reticleRadius * 0.8f;
+    const float crossVerts[] = {
+        -crossHalf, 0.0f,  crossHalf, 0.0f,
+         0.0f, -crossHalf, 0.0f,  crossHalf
+    };
+    GLuint reticleCrossVAO = 0, reticleCrossVBO = 0;
+    glGenVertexArrays(1, &reticleCrossVAO);
+    glGenBuffers(1, &reticleCrossVBO);
+    glBindVertexArray(reticleCrossVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, reticleCrossVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(crossVerts), crossVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glBindVertexArray(0);
+
     // Compute bbox
     Vec3 bmin{+1e9f,+1e9f,+1e9f}, bmax{-1e9f,-1e9f,-1e9f};
     for(const auto& v: M.verts){ bmin.x=std::min(bmin.x,v.x); bmin.y=std::min(bmin.y,v.y); bmin.z=std::min(bmin.z,v.z);
@@ -1634,6 +1713,16 @@ int main(int argc, char** argv){
     float minDist = noFit ? std::max(0.1f, sceneSpan * 0.05f) : 0.2f;
     float maxDist = noFit ? sceneSpan * 50.0f : 50.0f;
 
+    Vec3 camPos{};
+    {
+        float cp = std::cos(pitch), sp = std::sin(pitch);
+        float cy = std::cos(yaw), sy = std::sin(yaw);
+        camPos.x = cp * cy * camDist;
+        camPos.y = sp * camDist;
+        camPos.z = cp * sy * camDist;
+    }
+    bool showReticle = false;
+
     // Simple orbit camera + bbox
     bool drawBox=false;
     bool wireframe=false;
@@ -1658,6 +1747,20 @@ int main(int argc, char** argv){
 
         if(drawBox){
             drawBBox(bmin, bmax, axisProg, axisUMVP, MVP, std::array<float,3>{1.f, 1.f, 0.f});
+            glUseProgram(prog);
+        }
+        if (showReticle) {
+            glDisable(GL_DEPTH_TEST);
+            glUseProgram(reticleProg);
+            glUniform3f(reticleColorLoc, 1.0f, 1.0f, 1.0f);
+            glBindVertexArray(reticleCircleVAO);
+            glLineWidth(1.5f);
+            glDrawArrays(GL_LINE_LOOP, 0, reticleCircleCount);
+            glBindVertexArray(reticleCrossVAO);
+            glDrawArrays(GL_LINES, 0, 4);
+            glLineWidth(1.0f);
+            glBindVertexArray(0);
+            glEnable(GL_DEPTH_TEST);
             glUseProgram(prog);
         }
     };
@@ -1691,76 +1794,132 @@ int main(int argc, char** argv){
     };
 
     while(true){
+        uint32_t now = SDL_GetTicks();
+        float dt = (now - last) * 0.001f;
+        last = now;
+        t += dt;
+
         SDL_Event e;
-        while(SDL_PollEvent(&e)){
-            if(e.type==SDL_QUIT) { return shutdownAndExit(0); }
-            if(e.type==SDL_WINDOWEVENT && e.window.event==SDL_WINDOWEVENT_SIZE_CHANGED){
-                winW = e.window.data1; winH = e.window.data2; glViewport(0,0,winW,winH);
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) { return shutdownAndExit(0); }
+            if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                winW = e.window.data1; winH = e.window.data2; glViewport(0, 0, winW, winH);
             }
-            if(e.type==SDL_KEYDOWN){
+            if (e.type == SDL_KEYDOWN) {
                 SDL_Scancode sc = e.key.keysym.scancode;
-                if(sc==SDL_SCANCODE_ESCAPE) { return shutdownAndExit(0); }
-                if(sc==SDL_SCANCODE_O || sc==SDL_SCANCODE_E){ std::cerr<<"[export] key -> OBJ/MTL/TGA\n"; exportOBJ(M, outBase); }
-                if(sc==SDL_SCANCODE_P){
+                if (sc == SDL_SCANCODE_ESCAPE) { return shutdownAndExit(0); }
+                if (sc == SDL_SCANCODE_O || sc == SDL_SCANCODE_E) { std::cerr << "[export] key -> OBJ/MTL/TGA\n"; exportOBJ(M, outBase); }
+                if (sc == SDL_SCANCODE_P) {
                     currentPalette = (currentPalette + 1) % loadedPalettes.size();
                     std::cerr << "[pal] switching to " << paletteFiles[currentPalette] << "\n";
-                    for(int i=0;i<256;i++) gPalette[i] = loadedPalettes[currentPalette][i];
-                    for(auto& T : M.textures){
-                        if(!T.idx.empty()){
+                    for (int i = 0;i < 256;i++) gPalette[i] = loadedPalettes[currentPalette][i];
+                    for (auto& T : M.textures) {
+                        if (!T.idx.empty()) {
                             palToRGBA(T.idx, T.w, T.h, T.rgba);
                             glBindTexture(GL_TEXTURE_2D, T.gl);
-                            glTexSubImage2D(GL_TEXTURE_2D,0,0,0,T.w,T.h,GL_RGBA,GL_UNSIGNED_BYTE,T.rgba.data());
+                            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, T.w, T.h, GL_RGBA, GL_UNSIGNED_BYTE, T.rgba.data());
                         }
                     }
                     glBindTexture(GL_TEXTURE_2D, 0);
                 }
-                if(sc==SDL_SCANCODE_B){ drawBox = !drawBox; }
-                if(sc==SDL_SCANCODE_W){
+                if (sc == SDL_SCANCODE_B) { drawBox = !drawBox; }
+                if (sc == SDL_SCANCODE_W) {
                     wireframe = !wireframe;
                     glPolygonMode(GL_FRONT_AND_BACK, wireframe ? GL_LINE : GL_FILL);
                 }
-                if(sc==SDL_SCANCODE_A){
+                if (sc == SDL_SCANCODE_X) {
                     showAxis = !showAxis;
+                }
+                if (sc == SDL_SCANCODE_I) {
+                    showReticle = !showReticle;
                 }
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-               rotating = true;
-               SDL_SetRelativeMouseMode(SDL_TRUE); // grab mouse while rotating
+                rotating = true;
+                SDL_SetRelativeMouseMode(SDL_TRUE); // grab mouse while rotating
             }
             if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
-               rotating = false;
-               SDL_SetRelativeMouseMode(SDL_FALSE);
+                rotating = false;
+                SDL_SetRelativeMouseMode(SDL_FALSE);
             }
             if (e.type == SDL_MOUSEMOTION && rotating) {
                 const float sens = 0.005f; // radians per pixel
-                yaw   += e.motion.xrel * sens;
+                yaw += e.motion.xrel * sens;
                 pitch += -e.motion.yrel * sens;
                 pitch = std::clamp(pitch, -1.5f, 1.5f); // avoid flipping over
             }
             if (e.type == SDL_MOUSEWHEEL) {
                 if (e.wheel.y != 0) {
                     // zoom in on positive y, out on negative; exponential feels nicer
-                    camDist *= std::pow(0.9f, (float)e.wheel.y);
-                    camDist = std::clamp(camDist, minDist, maxDist);
+                    float oldDist = vecLength(camPos);
+                    if (oldDist < 1e-6f) oldDist = 1e-6f;
+                    float newDist = std::clamp(oldDist * std::pow(0.9f, (float)e.wheel.y), minDist, maxDist);
+                    float scale = newDist / oldDist;
+                    camPos = vecScale(camPos, scale);
+                    camDist = newDist;
                 }
             }
             // optional: R to reset view
             if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_R) {
                 yaw = 0.8f; pitch = 0.35f;
                 camDist = noFit ? (sceneSpan * 2.2f + 1.0f) : 4.0f;
-                }
-             }
+            }
+        }
+        pitch = std::clamp(pitch, -1.5f, 1.5f);
 
-        uint32_t now = SDL_GetTicks(); float dt=(now-last)*0.001f; last=now; t+=dt;
+        const Uint8* keys = SDL_GetKeyboardState(nullptr);
+        const float turnSpeed = 1.5f;
+        if (keys[SDL_SCANCODE_LEFT]) yaw -= turnSpeed * dt;
+        if (keys[SDL_SCANCODE_RIGHT]) yaw += turnSpeed * dt;
+        if (keys[SDL_SCANCODE_UP]) pitch -= turnSpeed * dt;
+        if (keys[SDL_SCANCODE_DOWN]) pitch += turnSpeed * dt;
 
-        // Orbit camera from yaw/pitch/distance, targeting origin
         float cp = std::cos(pitch), sp = std::sin(pitch);
-        float cy = std::cos(yaw),   sy = std::sin(yaw);
-        float ex = cp * cy * camDist;
-        float ey = sp * camDist;
-        float ez = cp * sy * camDist;
-        Mat4 V = lookAt(ex, ey, ez,  0,0,0,  0,1,0);
+        float cy = std::cos(yaw), sy = std::sin(yaw);
+        Vec3 forward{ cp * cy, sp, cp * sy };
+        Vec3 worldUp{ 0.0f, 1.0f, 0.0f };
+        Vec3 right = vecCross(worldUp, forward);
+        float rightLen = vecLength(right);
+        if (rightLen > 1e-6f) {
+            right = vecScale(right, 1.0f / rightLen);
+        }
 
+        const float moveSpeed = std::max(sceneSpan * 0.5f, 0.5f);
+        float moveInput = 0.0f;
+        if (keys[SDL_SCANCODE_A]) moveInput += 0.01f;
+        if (keys[SDL_SCANCODE_Z]) moveInput -= 0.01f;
+        if (std::abs(moveInput) > 0.0f) {
+            camPos = vecAdd(camPos, vecScale(forward, moveInput * moveSpeed * dt));
+        }
+
+        float truckInput = 0.0f;
+        if (keys[SDL_SCANCODE_KP_4]) truckInput -= 0.01f;
+        if (keys[SDL_SCANCODE_KP_6]) truckInput += 0.01f;
+        if (std::abs(truckInput) > 0.0f && rightLen > 1e-6f) {
+            camPos = vecAdd(camPos, vecScale(right, truckInput * moveSpeed * dt));
+        }
+
+        float jibInput = 0.0f;
+        if (keys[SDL_SCANCODE_KP_8]) jibInput += 0.01f;
+        if (keys[SDL_SCANCODE_KP_2]) jibInput -= 0.01f;
+        if (std::abs(jibInput) > 0.0f) {
+            camPos = vecAdd(camPos, vecScale(worldUp, jibInput * moveSpeed * dt));
+        }
+
+        camDist = vecLength(camPos);
+        if (camDist < minDist || camDist > maxDist) {
+            Vec3 dir = vecNormalize(camPos);
+            if (vecLength(dir) <= 1e-6f) {
+                dir = vecNormalize(forward);
+            }
+            float target = std::clamp(camDist, minDist, maxDist);
+            camPos = vecScale(dir, target);
+            camDist = target;
+        }
+
+        Mat4 V = lookAt(camPos.x, camPos.y, camPos.z,
+            camPos.x + forward.x, camPos.y + forward.y, camPos.z + forward.z,
+            0, 1, 0);
         // Model matrix: translate to origin then scale to fit
         Mat4 Mdl = noFit ? translate(0,0,0) : mul(scale1(fitScale), translate(-center.x, -center.y, -center.z));
 
