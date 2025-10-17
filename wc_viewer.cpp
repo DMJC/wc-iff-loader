@@ -98,6 +98,9 @@ struct Model{
     string name;
     vector<SubModel> submodels;
     vector<ObjGroup> groups;
+    std::string afterburnerModelName;
+    std::vector<glm::vec3> afterburnerOffsets;
+    std::vector<Model> afterburnerFrames;
 };
 struct SubModel {
     std::string name;
@@ -456,7 +459,7 @@ static void applyRotation(Model& m, float yawDeg, float pitchDeg, float rollDeg)
 }
 
 // ----------------------------- Loader (HCl geometry + textures) -----------------------------
-static bool load_wc3_model_hcl_textured(const string& path, Model& M){
+static bool load_wc3_model_hcl_textured(const string& path, Model& M, std::vector<Model>* lodFrames=nullptr){
     // Minimal IFF loader (recurses already in IFF::load)
     IFF iff; if(!iff.load(path)){ std::cerr<<"Not a REAL/FORM IFF\n"; return false; }
     M.name = stemFromPath(path);
@@ -499,7 +502,19 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     const Chunk* VERT = findFirst(&iff.root,"VERT");
     const Chunk* TRIS = findFirst(&iff.root,"FORM","TRIS");
     const Chunk* QUAD = findFirst(&iff.root,"FORM","QUAD");
-    const Chunk* LVL0 = findFirst(&iff.root,"LVL0");
+    std::array<std::vector<uint16_t>, 8> lvlFaces;
+    for (int lvl = 0; lvl < 8; ++lvl) {
+        char id[5];
+        std::snprintf(id, sizeof(id), "LVL%d", lvl);
+        if (const Chunk* chunk = findFirst(&iff.root, id)) {
+            const uint8_t* p = &iff.buf[chunk->start + 8];
+            uint32_t sz = be32(&iff.buf[chunk->start + 4]);
+            size_t n = sz / 2;
+            auto& dst = lvlFaces[lvl];
+            dst.resize(n);
+            for (size_t i = 0; i < n; ++i) dst[i] = le16u(p + i * 2);
+        }
+    }
     const Chunk* TXMS = findFirst(&iff.root,"FORM","TXMS");
     if(!VERT){ std::cerr<<"VERT missing\n"; return false; }
 
@@ -595,15 +610,6 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         }
     }
 
-    // LVL0 list (optional face-order table)
-    vector<uint16_t> lvl0;
-    if(LVL0){
-        const uint8_t* p=&iff.buf[LVL0->start+8];
-        uint32_t sz = be32(&iff.buf[LVL0->start+4]);
-        size_t n = sz/2; lvl0.resize(n);
-        for(size_t i=0;i<n;i++) lvl0[i]=le16u(p+i*2);
-    }
-
     // Fallback for TRIS without FACE (INDX/MAPS)
     if(!T_FACE && TRIS){
         const Chunk* INDX=nullptr; const Chunk* MAPS=nullptr;
@@ -639,9 +645,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     auto inRange=[&](uint32_t i){ return i<M.verts.size(); };
     auto passFlag=[](uint16_t flag){ return (flag & 0xFF) == 1; };
 
-    M.tris.clear();
-
-    auto addTri = [&](const FaceT& ft){
+    auto addTriTo = [&](Model& dest, const FaceT& ft){
         if(!(inRange(ft.v[0])&&inRange(ft.v[1])&&inRange(ft.v[2]))) return;
         Tri t{}; t.tex = ft.tex;
         // HCl viewer draws triangles as (v2,v1,v0)
@@ -653,10 +657,10 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             t.uv[4]=(float)ft.uvpx[0]; t.uv[5]=(float)ft.uvpx[1];
             t.hasTex=true;
         }
-        M.tris.push_back(t);
+        dest.tris.push_back(t);
     };
 
-    auto addQuadAsTwo = [&](const FaceQ& fq){
+    auto addQuadAsTwo = [&](Model& dest, const FaceQ& fq){
         if(!(inRange(fq.v[0])&&inRange(fq.v[1])&&inRange(fq.v[2])&&inRange(fq.v[3]))) return;
         // tri A: (v2,v1,v0)
         {
@@ -668,7 +672,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 t.uv[4]=(float)fq.uvpx[0]; t.uv[5]=(float)fq.uvpx[1];
                 t.hasTex=true;
             }
-            M.tris.push_back(t);
+            dest.tris.push_back(t);
         }
         // tri B: (v3,v2,v0)
         {
@@ -680,27 +684,31 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 t.uv[4]=(float)fq.uvpx[0]; t.uv[5]=(float)fq.uvpx[1];
                 t.hasTex=true;
             }
-            M.tris.push_back(t);
+            dest.tris.push_back(t);
+        }
+    };
+    auto populateModel = [&](Model& dest, const std::vector<uint16_t>& order, bool fallback){
+        dest.tris.clear();
+        if(!order.empty()){
+            for(uint16_t idx : order){
+                if(idx < tris.size()){
+                    const auto& ft=tris[idx];
+                    if(ft.hasTex || passFlag(ft.flag)) addTriTo(dest, ft);
+                }else{
+                    size_t qi = idx - (uint16_t)tris.size();
+                    if(qi<quads.size()){
+                        const auto& fq=quads[qi];
+                        if(fq.hasTex || passFlag(fq.flag)) addQuadAsTwo(dest, fq);
+                    }
+                }
+            }
+        }else if(fallback){
+            for(const auto& ft: tris) addTriTo(dest, ft);
+            for(const auto& fq: quads) addQuadAsTwo(dest, fq);
         }
     };
 
-    if(!lvl0.empty()){
-        for(uint16_t idx: lvl0){
-            if(idx < tris.size()){
-                const auto& ft=tris[idx];
-                if(ft.hasTex || passFlag(ft.flag)) addTri(ft);
-            }else{
-                size_t qi = idx - (uint16_t)tris.size();
-                if(qi<quads.size()){
-                    const auto& fq=quads[qi];
-                    if(fq.hasTex || passFlag(fq.flag)) addQuadAsTwo(fq);
-                }
-            }
-        }
-    }else{
-        for(const auto& ft: tris) addTri(ft);
-        for(const auto& fq: quads) addQuadAsTwo(fq);
-    }
+    populateModel(M, lvlFaces[0], true);
 
     // Textures
     M.textures.clear();
@@ -735,6 +743,19 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         }
         std::cerr << "[tex] decoded " << ok << "/" << total
                   << " (RAW="<<rawCnt<<", RLE="<<rleCnt<<")\n";
+    }
+
+    if (lodFrames) {
+        lodFrames->clear();
+        lodFrames->resize(8);
+        for (int lvl = 0; lvl < 8; ++lvl) {
+            Model frame;
+            frame.name = M.name + "_frame" + std::to_string(lvl);
+            frame.verts = M.verts;
+            frame.textures = M.textures;
+            populateModel(frame, lvlFaces[lvl], lvl == 0);
+            (*lodFrames)[lvl] = std::move(frame);
+        }
     }
     std::cerr << "[geom] verts="<<M.verts.size()<<" tris="<<M.tris.size()<<" tex="<<M.textures.size()<<"\n";
 
@@ -1029,6 +1050,95 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                       << " roll=" << C.rollDeg
                       << " flag=" << C.sentinel
                       << "\n";
+        }
+    }
+
+    if (const Chunk* AFTB = findFirst(&iff.root, "AFTB")) {
+        const uint8_t* data = &iff.buf[AFTB->start + 8];
+        uint32_t payloadSize = be32(&iff.buf[AFTB->start + 4]);
+        if (payloadSize < 16) {
+            std::cerr << "[AFTB] payload too small (" << payloadSize << ")\n";
+        } else {
+            uint32_t engineCount = (uint32_t)le32s(data + 0);
+            (void)le32s(data + 4); // reserved/unused field
+            size_t nameBytes = std::min<size_t>(8, payloadSize - 8);
+            std::string abName(reinterpret_cast<const char*>(data + 8), nameBytes);
+            while (!abName.empty() && (abName.back() == '\0' || abName.back() == ' ')) abName.pop_back();
+            size_t pos = 16;
+            size_t available = (payloadSize > pos) ? (payloadSize - pos) : 0;
+            size_t entries = available / 12;
+            size_t engines = std::min<size_t>(engineCount, entries);
+            M.afterburnerModelName = abName;
+            M.afterburnerOffsets.clear();
+            for (size_t i = 0; i < engines; ++i) {
+                const uint8_t* e = data + pos + i * 12;
+                glm::vec3 offset(
+                    le32s(e + 0) / 256.0f,
+                    le32s(e + 4) / 256.0f,
+                    le32s(e + 8) / 256.0f
+                );
+                M.afterburnerOffsets.push_back(offset);
+            }
+            if (engines < engineCount) {
+                std::cerr << "[AFTB] expected " << engineCount << " engine mounts, got " << engines << "\n";
+            }
+            if (abName.empty()) {
+                std::cerr << "[AFTB] empty model name\n";
+            } else {
+                std::string abPath = baseDir + abName + ".IFF";
+                if (abPath == path) {
+                    std::cerr << "[AFTB] refusing to load self-reference " << abPath << "\n";
+                } else {
+                    Model abModel;
+                    std::vector<Model> abFrames;
+                    if (!load_wc3_model_hcl_textured(abPath, abModel, &abFrames)) {
+                        std::cerr << "[AFTB] failed to load " << abPath << "\n";
+                    } else {
+                        if (abFrames.empty()) {
+                            std::cerr << "[AFTB] no frames in " << abPath << "\n";
+                        } else {
+                            if (abFrames.size() < 8) {
+                                abFrames.resize(8);
+                            }
+                            M.afterburnerFrames.clear();
+                            M.afterburnerFrames.reserve(abFrames.size());
+                            for (size_t i = 0; i < abFrames.size(); ++i) {
+                                const Model& srcFrame = abFrames[i];
+                                Model combined;
+                                combined.name = srcFrame.name;
+                                combined.textures = srcFrame.textures;
+                                if (M.afterburnerOffsets.empty()) {
+                                combined.verts = srcFrame.verts;
+                                combined.tris = srcFrame.tris;
+                            } else {
+                                for (const auto& offset : M.afterburnerOffsets) {
+                                    size_t vBase = combined.verts.size();
+                                    combined.verts.reserve(combined.verts.size() + srcFrame.verts.size());
+                                    for (const auto& v : srcFrame.verts) {
+                                        combined.verts.push_back({ v.x + offset.x, v.y + offset.y, v.z + offset.z });
+                                    }
+                                    combined.tris.reserve(combined.tris.size() + srcFrame.tris.size());
+                                    for (const auto& tri : srcFrame.tris) {
+                                        Tri t = tri;
+                                        t.v[0] += (uint32_t)vBase;
+                                        t.v[1] += (uint32_t)vBase;
+                                        t.v[2] += (uint32_t)vBase;
+                                        combined.tris.push_back(t);
+                                    }
+                                }
+                            }
+                            combined.afterburnerModelName.clear();
+                            combined.afterburnerOffsets.clear();
+                            combined.afterburnerFrames.clear();
+                            M.afterburnerFrames.push_back(std::move(combined));
+                        }
+                        std::cerr << "[AFTB] model=" << abName
+                                  << " frames=" << M.afterburnerFrames.size()
+                                  << " engines=" << M.afterburnerOffsets.size()
+                                  << "\n";
+                    }
+                }
+            }
         }
     }
 
@@ -1565,6 +1675,19 @@ int main(int argc, char** argv){
 
     // Build batches
     auto batches = buildBatches(M);
+    std::vector<std::vector<Batch>> afterburnerBatches;
+    if (!M.afterburnerFrames.empty()) {
+        afterburnerBatches.resize(M.afterburnerFrames.size());
+        for (size_t i = 0; i < M.afterburnerFrames.size(); ++i) {
+            Model& frameModel = M.afterburnerFrames[i];
+            for (auto& T : frameModel.textures) {
+                if (T.skipRender) continue;
+                uploadTexture(T);
+            }
+            afterburnerBatches[i] = buildBatches(frameModel);
+        }
+    }
+    int currentAfterburnerFrame = 0;
 
     // Shaders
     const char* VS =
@@ -1686,8 +1809,20 @@ int main(int argc, char** argv){
 
     // Compute bbox
     Vec3 bmin{+1e9f,+1e9f,+1e9f}, bmax{-1e9f,-1e9f,-1e9f};
-    for(const auto& v: M.verts){ bmin.x=std::min(bmin.x,v.x); bmin.y=std::min(bmin.y,v.y); bmin.z=std::min(bmin.z,v.z);
-                                  bmax.x=std::max(bmax.x,v.x); bmax.y=std::max(bmax.y,v.y);      bmax.z=std::max(bmax.z,v.z); }
+    auto expandBounds = [&](const Vec3& v){
+        bmin.x = std::min(bmin.x, v.x);
+        bmin.y = std::min(bmin.y, v.y);
+        bmin.z = std::min(bmin.z, v.z);
+        bmax.x = std::max(bmax.x, v.x);
+        bmax.y = std::max(bmax.y, v.y);
+        bmax.z = std::max(bmax.z, v.z);
+    };
+    for(const auto& v: M.verts){ expandBounds(v); }
+    for (const auto& frame : M.afterburnerFrames) {
+        for (const auto& v : frame.verts) {
+            expandBounds(v);
+        }
+    }
 
     // Auto-fit parameters (draw only)
     Vec3 center{
@@ -1730,18 +1865,28 @@ int main(int argc, char** argv){
     uint32_t last = SDL_GetTicks();
     float t=0.f; int winW=1280, winH=800;
 
-    auto renderBatches = [&](const Mat4& MVP){
-        glUseProgram(prog);
-        glUniformMatrix4fv(uMVP,1,GL_FALSE,MVP.m);
-        glUniform1i(uTex, 0);
-
-        for(const auto& b : batches){
+    auto drawModelBatches = [&](const Model& model, const std::vector<Batch>& bs){
+        for(const auto& b : bs){
             GLuint tex = (b.tex==65535) ? white.gl :
-                         (b.tex<M.textures.size() && M.textures[b.tex].gl ? M.textures[b.tex].gl : white.gl);
+                         (b.tex<model.textures.size() && model.textures[b.tex].gl ? model.textures[b.tex].gl : white.gl);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
             glBindVertexArray(b.vao);
             glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
+        }
+    };
+
+    auto renderScene = [&](const Mat4& MVP){
+        glUseProgram(prog);
+        glUniformMatrix4fv(uMVP,1,GL_FALSE,MVP.m);
+        glUniform1i(uTex, 0);
+
+        drawModelBatches(M, batches);
+        if (!afterburnerBatches.empty()) {
+            size_t idx = (size_t)std::clamp(currentAfterburnerFrame, 0, (int)afterburnerBatches.size() - 1);
+            if (idx < afterburnerBatches.size()) {
+                drawModelBatches(M.afterburnerFrames[idx], afterburnerBatches[idx]);
+            }
         }
         glBindVertexArray(0);
 
@@ -1807,6 +1952,18 @@ int main(int argc, char** argv){
             }
             if (e.type == SDL_KEYDOWN) {
                 SDL_Scancode sc = e.key.keysym.scancode;
+                if (!M.afterburnerFrames.empty()) {
+                    int newFrame = -1;
+                    if (sc >= SDL_SCANCODE_0 && sc <= SDL_SCANCODE_7) {
+                        newFrame = sc - SDL_SCANCODE_0;
+                    } else if (sc >= SDL_SCANCODE_KP_0 && sc <= SDL_SCANCODE_KP_7) {
+                        newFrame = sc - SDL_SCANCODE_KP_0;
+                    }
+                    if (newFrame >= 0 && newFrame < (int)M.afterburnerFrames.size()) {
+                        currentAfterburnerFrame = newFrame;
+                        std::cerr << "[AFTB] frame=" << currentAfterburnerFrame << "\n";
+                    }
+                }
                 if (sc == SDL_SCANCODE_ESCAPE) { return shutdownAndExit(0); }
                 if (sc == SDL_SCANCODE_O || sc == SDL_SCANCODE_E) { std::cerr << "[export] key -> OBJ/MTL/TGA\n"; exportOBJ(M, outBase); }
                 if (sc == SDL_SCANCODE_P) {
@@ -1933,7 +2090,7 @@ int main(int argc, char** argv){
                 glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
                 Mat4 eyeView = vr.viewForEye(eye, V);
                 Mat4 MVP = mul(vr.projectionForEye(eye), mul(eyeView, Mdl));
-                renderBatches(MVP);
+                renderScene(MVP);
             }
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0,0,winW,winH);
@@ -1959,7 +2116,7 @@ int main(int argc, char** argv){
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
         Mat4 MVP = mul(P, mul(V, Mdl));
-        renderBatches(MVP);
+        renderScene(MVP);
         renderAxisOverlay(V);
         SDL_GL_SwapWindow(win);
     }
