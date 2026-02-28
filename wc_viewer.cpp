@@ -1012,7 +1012,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         };
         struct CargoRec {
             std::string name;
-            glm::vec3   shipPosition{0.0f}; // decoded ship-space placement (X/Z 16.16, Y 8.8)
+            glm::vec3   shipPosition{0.0f}; // viewer-space placement
             float       yawDeg = 0.0f;
             float       pitchDeg = 0.0f;
             float       rollDeg = 0.0f;
@@ -1021,6 +1021,9 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             int32_t     rawX = 0;
             int32_t     rawY = 0;
             int32_t     rawZ = 0;
+            float       srcX = 0.0f;
+            float       srcY = 0.0f;
+            float       srcZ = 0.0f;
         };
         std::vector<CargoRec> cargos;
         cargos.reserve(entryCount);
@@ -1044,11 +1047,13 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 rec.rawY = rawY;
                 rec.rawZ = rawZ;
                 rec.rawYaw = rawYaw;
-                rec.shipPosition = glm::vec3(
-                    rawX / 65536.0f,
-                    rawY / 256.0f,
-                    rawZ / 65536.0f
-                );
+                // CRGO coordinates are mixed fixed-point: X/Z are 16.16 and Y is 8.8.
+                // The source coordinate frame is X-right, Y-up, Z-forward while the
+                // viewer model frame uses X-right, Y-forward, Z-up, so swap Y/Z.
+                rec.srcX = rawX / 65536.0f;
+                rec.srcY = rawY / 256.0f;
+                rec.srcZ = rawZ / 65536.0f;
+                rec.shipPosition = glm::vec3(rec.srcX, rec.srcZ, rec.srcY);
                 rec.yawDeg   = normalizeDegrees(rawYaw / 65536.0f);
                 rec.pitchDeg = rawPitch / 256.0f;
                 rec.rollDeg  = static_cast<float>(rawRoll);
@@ -1081,6 +1086,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             });
             std::cerr << "[CRGO] " << C.name
                       << " posRaw=(" << C.rawX << "," << C.rawY << "," << C.rawZ << ")"
+                      << " src=(" << C.srcX << "," << C.srcY << "," << C.srcZ << ")"
                       << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
                       << " yawRaw=" << C.rawYaw
                       << " yaw=" << C.yawDeg
