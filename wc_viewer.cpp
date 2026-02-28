@@ -455,6 +455,18 @@ static void applyRotation(Model& m, float yawDeg, float pitchDeg, float rollDeg)
     }
 }
 
+static void applyCargoYaw(Model& m, float yawDeg)
+{
+    if (std::fabs(yawDeg) <= 1e-6f) return;
+    // CRGO heading is around the ship's vertical axis (Z-up in model space).
+    glm::mat4 R = glm::rotate(glm::mat4(1.0f), glm::radians(yawDeg), glm::vec3(0,0,1));
+    for (auto& v : m.verts) {
+        glm::vec4 p(v.x, v.y, v.z, 1.0f);
+        p = R * p;
+        v.x = p.x; v.y = p.y; v.z = p.z;
+    }
+}
+
 static Model makeBoxModel(const std::string& name, float sx, float sy, float sz)
 {
     Model m;
@@ -1014,10 +1026,10 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             std::string name;
             glm::vec3   shipPosition{0.0f}; // viewer-space placement
             float       yawDeg = 0.0f;
-            float       pitchDeg = 0.0f;
-            float       rollDeg = 0.0f;
             int16_t     sentinel = 0;
             int32_t     rawYaw = 0;
+            int16_t     rawPitch = 0;
+            int8_t      rawRoll = 0;
             int32_t     rawX = 0;
             int32_t     rawY = 0;
             int32_t     rawZ = 0;
@@ -1047,6 +1059,8 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 rec.rawY = rawY;
                 rec.rawZ = rawZ;
                 rec.rawYaw = rawYaw;
+                rec.rawPitch = rawPitch;
+                rec.rawRoll = rawRoll;
                 // CRGO coordinates are mixed fixed-point: X/Z are 16.16 and Y is 8.8.
                 // The source coordinate frame is X-right, Y-up, Z-forward while the
                 // viewer model frame uses X-right, Y-forward, Z-up, so swap Y/Z.
@@ -1055,8 +1069,6 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 rec.srcZ = rawZ / 65536.0f;
                 rec.shipPosition = glm::vec3(rec.srcX, rec.srcZ, rec.srcY);
                 rec.yawDeg   = normalizeDegrees(rawYaw / 65536.0f);
-                rec.pitchDeg = rawPitch / 256.0f;
-                rec.rollDeg  = static_cast<float>(rawRoll);
                 rec.sentinel = sentinel;
                 cargos.push_back(rec);
             }
@@ -1074,7 +1086,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 }
                 std::cerr << "[CRGO] Using placeholder for cargo type " << C.name << "\n";
             }
-            applyRotation(cargoModel, C.yawDeg, C.pitchDeg, C.rollDeg);
+            applyCargoYaw(cargoModel, C.yawDeg);
             glm::vec3 pos = C.shipPosition;
             std::string subName = "cargo_" + std::to_string(i) + "_" + C.name;
             M.submodels.push_back(SubModel{
@@ -1090,8 +1102,8 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                       << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
                       << " yawRaw=" << C.rawYaw
                       << " yaw=" << C.yawDeg
-                      << " pitch=" << C.pitchDeg
-                      << " roll=" << C.rollDeg
+                      << " pitchRaw=" << C.rawPitch
+                      << " rollRaw=" << int(C.rawRoll)
                       << " flag=" << C.sentinel
                       << "\n";
         }
