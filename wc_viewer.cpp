@@ -1089,6 +1089,40 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     return true;
 }
 
+static bool loadSiblingModelIFF(const std::string& sourcePath, const std::string& rawName, Model& out)
+{
+    if (rawName.empty()) return false;
+    std::string baseDir = sourcePath;
+    {
+        auto pos = baseDir.find_last_of("/\\");
+        baseDir = (pos == std::string::npos) ? std::string() : baseDir.substr(0, pos + 1);
+    }
+
+    std::vector<std::string> candidates;
+    auto addCandidate = [&](std::string name) {
+        if (name.empty()) return;
+        if (std::find(candidates.begin(), candidates.end(), name) == candidates.end()) {
+            candidates.push_back(std::move(name));
+        }
+    };
+    addCandidate(rawName);
+    std::string upper = rawName;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c){ return (char)std::toupper(c); });
+    addCandidate(upper);
+    std::string lower = rawName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+    addCandidate(lower);
+
+    for (const auto& candidate : candidates) {
+        std::string file = baseDir + candidate + ".IFF";
+        std::ifstream f(file, std::ios::binary);
+        if (!f) continue;
+        f.close();
+        if (load_wc3_model_hcl_textured(file, out)) return true;
+    }
+    return false;
+}
+
 // ----------------------------- GL batching -----------------------------
 struct Vtx { float x,y,z,u,v; };
 struct Batch { GLuint vao=0,vbo=0,ebo=0; GLsizei idxCount=0; uint16_t tex=0; };
@@ -1692,26 +1726,24 @@ int main(int argc, char** argv){
     glBindVertexArray(0);
     const GLsizei axisVertCount = (GLsizei)(sizeof(axisVerts)/sizeof(axisVerts[0]));
 
-    struct BurnerVertex { float x,y,z,r,g,b; };
-    GLuint burnerVAO = 0, burnerVBO = 0;
-    GLsizei burnerCount = 0;
+    Model aftbEffectModel;
+    vector<Batch> aftbEffectBatches;
+    std::string aftbEffectName;
     if (!M.aftBurners.empty()) {
-        std::vector<BurnerVertex> burners;
-        burners.reserve(M.aftBurners.size());
-        for (const auto& b : M.aftBurners) {
-            burners.push_back(BurnerVertex{b.pos.x, b.pos.y, b.pos.z, 1.0f, 0.5f, 0.1f});
+        aftbEffectName = M.aftBurners.front().effectName;
+        if (!aftbEffectName.empty()) {
+            if (loadSiblingModelIFF(path, aftbEffectName, aftbEffectModel)) {
+                for (auto& T : aftbEffectModel.textures) {
+                    if (T.skipRender) continue;
+                    uploadTexture(T);
+                }
+                aftbEffectBatches = buildBatches(aftbEffectModel);
+                std::cerr << "[AFTB] loaded effect model " << aftbEffectName
+                          << " batches=" << aftbEffectBatches.size() << "\n";
+            } else {
+                std::cerr << "[AFTB] Missing effect model " << aftbEffectName << ".IFF\n";
+            }
         }
-        burnerCount = (GLsizei)burners.size();
-        glGenVertexArrays(1, &burnerVAO);
-        glGenBuffers(1, &burnerVBO);
-        glBindVertexArray(burnerVAO);
-        glBindBuffer(GL_ARRAY_BUFFER, burnerVBO);
-        glBufferData(GL_ARRAY_BUFFER, burners.size() * sizeof(BurnerVertex), burners.data(), GL_STATIC_DRAW);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BurnerVertex), (void*)0);
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BurnerVertex), (void*)(3 * sizeof(float)));
-        glBindVertexArray(0);
     }
 
     const char* reticleVS =
@@ -1820,16 +1852,6 @@ int main(int argc, char** argv){
         }
         glBindVertexArray(0);
 
-        if (burnerCount > 0) {
-            glUseProgram(axisProg);
-            glUniformMatrix4fv(axisUMVP, 1, GL_FALSE, MVP.m);
-            glBindVertexArray(burnerVAO);
-            glPointSize(8.0f);
-            glDrawArrays(GL_POINTS, 0, burnerCount);
-            glBindVertexArray(0);
-            glUseProgram(prog);
-        }
-
         if(drawBox){
             drawBBox(bmin, bmax, axisProg, axisUMVP, MVP, std::array<float,3>{1.f, 1.f, 0.f});
             glUseProgram(prog);
@@ -1847,6 +1869,30 @@ int main(int argc, char** argv){
             glBindVertexArray(0);
             glEnable(GL_DEPTH_TEST);
             glUseProgram(prog);
+        }
+    };
+
+    auto renderAftbEffects = [&](const Mat4& Pmat, const Mat4& Vmat, const Mat4& shipModel, float timeSec){
+        if (aftbEffectBatches.empty() || M.aftBurners.empty()) return;
+
+        glUseProgram(prog);
+        glUniform1i(uTex, 0);
+        float pulse = 0.85f + 0.25f * (0.5f + 0.5f * std::sin(timeSec * 8.0f));
+
+        for (const auto& mount : M.aftBurners) {
+            Mat4 effectModel = mul(shipModel, mul(translate(mount.pos.x, mount.pos.y, mount.pos.z), scale1(pulse)));
+            Mat4 MVP = mul(Pmat, mul(Vmat, effectModel));
+            glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP.m);
+
+            for (const auto& b : aftbEffectBatches) {
+                GLuint tex = (b.tex==65535) ? white.gl :
+                    (b.tex<aftbEffectModel.textures.size() && aftbEffectModel.textures[b.tex].gl ? aftbEffectModel.textures[b.tex].gl : white.gl);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glBindVertexArray(b.vao);
+                glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
+            }
+            glBindVertexArray(0);
         }
     };
 
@@ -2019,6 +2065,7 @@ int main(int argc, char** argv){
                 Mat4 eyeView = vr.viewForEye(eye, V);
                 Mat4 MVP = mul(vr.projectionForEye(eye), mul(eyeView, Mdl));
                 renderBatches(MVP);
+                renderAftbEffects(vr.projectionForEye(eye), eyeView, Mdl, t);
             }
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0,0,winW,winH);
@@ -2045,6 +2092,7 @@ int main(int argc, char** argv){
 
         Mat4 MVP = mul(P, mul(V, Mdl));
         renderBatches(MVP);
+        renderAftbEffects(P, V, Mdl, t);
         renderAxisOverlay(V);
         SDL_GL_SwapWindow(win);
     }
