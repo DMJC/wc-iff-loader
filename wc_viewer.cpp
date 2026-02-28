@@ -90,6 +90,11 @@ struct ObjGroup {
     size_t triCount = 0;  // how many triangles belong to this group
 };
 
+struct AfterburnerMount {
+    std::string effectName;
+    Vec3 pos;
+};
+
 struct SubModel;
 struct Model{
     vector<Vec3> verts;
@@ -98,6 +103,7 @@ struct Model{
     string name;
     vector<SubModel> submodels;
     vector<ObjGroup> groups;
+    vector<AfterburnerMount> aftBurners;
 };
 struct SubModel {
     std::string name;
@@ -496,6 +502,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     };
 
     const Chunk* TURT = findFirst(&iff.root,"TURT");
+    const Chunk* AFTB = findFirst(&iff.root,"FORM","AFTB");
     const Chunk* VERT = findFirst(&iff.root,"VERT");
     const Chunk* TRIS = findFirst(&iff.root,"FORM","TRIS");
     const Chunk* QUAD = findFirst(&iff.root,"FORM","QUAD");
@@ -873,6 +880,52 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         }
     }
 
+    if (AFTB) {
+        if (const Chunk* DATA = childOf(AFTB, "DATA")) {
+            const uint8_t* data = &iff.buf[DATA->start + 8];
+            uint32_t dataSize = be32(&iff.buf[DATA->start + 4]);
+            if (dataSize < 16) {
+                std::cerr << "[AFTB] DATA payload too small (" << dataSize << ")\n";
+            } else {
+                uint32_t mountCount = (uint32_t)le32s(data + 0);
+                uint32_t versionTag = (uint32_t)le32s(data + 4);
+                char nameBuf[9]{};
+                std::memcpy(nameBuf, data + 8, 8);
+                std::string effectName = nameBuf;
+                while (!effectName.empty() && effectName.back() == ' ') effectName.pop_back();
+
+                size_t expected = 16u + (size_t)mountCount * 12u;
+                if (expected > dataSize) {
+                    size_t available = (dataSize > 16u) ? ((dataSize - 16u) / 12u) : 0u;
+                    std::cerr << "[AFTB] DATA truncated; expected " << mountCount
+                              << " mounts, got " << available << "\n";
+                    mountCount = (uint32_t)available;
+                }
+
+                for (uint32_t i = 0; i < mountCount; ++i) {
+                    const uint8_t* row = data + 16u + (size_t)i * 12u;
+                    M.aftBurners.push_back(AfterburnerMount{
+                        effectName,
+                        Vec3{
+                            le32s(row + 0) / 256.0f,
+                            le32s(row + 4) / 256.0f,
+                            le32s(row + 8) / 256.0f
+                        }
+                    });
+                }
+
+                std::cerr << "[AFTB] effect=" << effectName
+                          << " tag=" << versionTag
+                          << " mounts=" << mountCount << "\n";
+                for (size_t i = 0; i < M.aftBurners.size(); ++i) {
+                    const auto& m = M.aftBurners[i];
+                    std::cerr << "[AFTB] mount " << i << " pos=("
+                              << m.pos.x << "," << m.pos.y << "," << m.pos.z << ")\n";
+                }
+            }
+        }
+    }
+
 
     if (const Chunk* APPR = findFirst(&iff.root, "FORM", "APPR")) {
         if (const Chunk* POLY = findFirst(APPR, "FORM", "POLY")) {
@@ -1034,6 +1087,40 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
 
     flattenSubmodelsInto(M);
     return true;
+}
+
+static bool loadSiblingModelIFF(const std::string& sourcePath, const std::string& rawName, Model& out)
+{
+    if (rawName.empty()) return false;
+    std::string baseDir = sourcePath;
+    {
+        auto pos = baseDir.find_last_of("/\\");
+        baseDir = (pos == std::string::npos) ? std::string() : baseDir.substr(0, pos + 1);
+    }
+
+    std::vector<std::string> candidates;
+    auto addCandidate = [&](std::string name) {
+        if (name.empty()) return;
+        if (std::find(candidates.begin(), candidates.end(), name) == candidates.end()) {
+            candidates.push_back(std::move(name));
+        }
+    };
+    addCandidate(rawName);
+    std::string upper = rawName;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c){ return (char)std::toupper(c); });
+    addCandidate(upper);
+    std::string lower = rawName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+    addCandidate(lower);
+
+    for (const auto& candidate : candidates) {
+        std::string file = baseDir + candidate + ".IFF";
+        std::ifstream f(file, std::ios::binary);
+        if (!f) continue;
+        f.close();
+        if (load_wc3_model_hcl_textured(file, out)) return true;
+    }
+    return false;
 }
 
 // ----------------------------- GL batching -----------------------------
@@ -1639,6 +1726,26 @@ int main(int argc, char** argv){
     glBindVertexArray(0);
     const GLsizei axisVertCount = (GLsizei)(sizeof(axisVerts)/sizeof(axisVerts[0]));
 
+    Model aftbEffectModel;
+    vector<Batch> aftbEffectBatches;
+    std::string aftbEffectName;
+    if (!M.aftBurners.empty()) {
+        aftbEffectName = M.aftBurners.front().effectName;
+        if (!aftbEffectName.empty()) {
+            if (loadSiblingModelIFF(path, aftbEffectName, aftbEffectModel)) {
+                for (auto& T : aftbEffectModel.textures) {
+                    if (T.skipRender) continue;
+                    uploadTexture(T);
+                }
+                aftbEffectBatches = buildBatches(aftbEffectModel);
+                std::cerr << "[AFTB] loaded effect model " << aftbEffectName
+                          << " batches=" << aftbEffectBatches.size() << "\n";
+            } else {
+                std::cerr << "[AFTB] Missing effect model " << aftbEffectName << ".IFF\n";
+            }
+        }
+    }
+
     const char* reticleVS =
         "#version 330 core\n"
         "layout(location=0) in vec2 aPos;\n"
@@ -1762,6 +1869,30 @@ int main(int argc, char** argv){
             glBindVertexArray(0);
             glEnable(GL_DEPTH_TEST);
             glUseProgram(prog);
+        }
+    };
+
+    auto renderAftbEffects = [&](const Mat4& Pmat, const Mat4& Vmat, const Mat4& shipModel, float timeSec){
+        if (aftbEffectBatches.empty() || M.aftBurners.empty()) return;
+
+        glUseProgram(prog);
+        glUniform1i(uTex, 0);
+        float pulse = 0.85f + 0.25f * (0.5f + 0.5f * std::sin(timeSec * 8.0f));
+
+        for (const auto& mount : M.aftBurners) {
+            Mat4 effectModel = mul(shipModel, mul(translate(mount.pos.x, mount.pos.y, mount.pos.z), scale1(pulse)));
+            Mat4 MVP = mul(Pmat, mul(Vmat, effectModel));
+            glUniformMatrix4fv(uMVP, 1, GL_FALSE, MVP.m);
+
+            for (const auto& b : aftbEffectBatches) {
+                GLuint tex = (b.tex==65535) ? white.gl :
+                    (b.tex<aftbEffectModel.textures.size() && aftbEffectModel.textures[b.tex].gl ? aftbEffectModel.textures[b.tex].gl : white.gl);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glBindVertexArray(b.vao);
+                glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
+            }
+            glBindVertexArray(0);
         }
     };
 
@@ -1934,6 +2065,7 @@ int main(int argc, char** argv){
                 Mat4 eyeView = vr.viewForEye(eye, V);
                 Mat4 MVP = mul(vr.projectionForEye(eye), mul(eyeView, Mdl));
                 renderBatches(MVP);
+                renderAftbEffects(vr.projectionForEye(eye), eyeView, Mdl, t);
             }
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(0,0,winW,winH);
@@ -1960,6 +2092,7 @@ int main(int argc, char** argv){
 
         Mat4 MVP = mul(P, mul(V, Mdl));
         renderBatches(MVP);
+        renderAftbEffects(P, V, Mdl, t);
         renderAxisOverlay(V);
         SDL_GL_SwapWindow(win);
     }
