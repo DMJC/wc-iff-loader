@@ -90,6 +90,11 @@ struct ObjGroup {
     size_t triCount = 0;  // how many triangles belong to this group
 };
 
+struct AfterburnerMount {
+    std::string effectName;
+    Vec3 pos;
+};
+
 struct SubModel;
 struct Model{
     vector<Vec3> verts;
@@ -98,6 +103,7 @@ struct Model{
     string name;
     vector<SubModel> submodels;
     vector<ObjGroup> groups;
+    vector<AfterburnerMount> aftBurners;
 };
 struct SubModel {
     std::string name;
@@ -496,6 +502,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     };
 
     const Chunk* TURT = findFirst(&iff.root,"TURT");
+    const Chunk* AFTB = findFirst(&iff.root,"FORM","AFTB");
     const Chunk* VERT = findFirst(&iff.root,"VERT");
     const Chunk* TRIS = findFirst(&iff.root,"FORM","TRIS");
     const Chunk* QUAD = findFirst(&iff.root,"FORM","QUAD");
@@ -869,6 +876,52 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 std::cerr << "[TURT] " << T.baseModel << " pos=("
                           << T.pos.x << "," << T.pos.y << "," << T.pos.z << ")"
                           << " yaw=" << T.yaw << " pitch=" << T.pitch << "\n";
+            }
+        }
+    }
+
+    if (AFTB) {
+        if (const Chunk* DATA = childOf(AFTB, "DATA")) {
+            const uint8_t* data = &iff.buf[DATA->start + 8];
+            uint32_t dataSize = be32(&iff.buf[DATA->start + 4]);
+            if (dataSize < 16) {
+                std::cerr << "[AFTB] DATA payload too small (" << dataSize << ")\n";
+            } else {
+                uint32_t mountCount = (uint32_t)le32s(data + 0);
+                uint32_t versionTag = (uint32_t)le32s(data + 4);
+                char nameBuf[9]{};
+                std::memcpy(nameBuf, data + 8, 8);
+                std::string effectName = nameBuf;
+                while (!effectName.empty() && effectName.back() == ' ') effectName.pop_back();
+
+                size_t expected = 16u + (size_t)mountCount * 12u;
+                if (expected > dataSize) {
+                    size_t available = (dataSize > 16u) ? ((dataSize - 16u) / 12u) : 0u;
+                    std::cerr << "[AFTB] DATA truncated; expected " << mountCount
+                              << " mounts, got " << available << "\n";
+                    mountCount = (uint32_t)available;
+                }
+
+                for (uint32_t i = 0; i < mountCount; ++i) {
+                    const uint8_t* row = data + 16u + (size_t)i * 12u;
+                    M.aftBurners.push_back(AfterburnerMount{
+                        effectName,
+                        Vec3{
+                            le32s(row + 0) / 256.0f,
+                            le32s(row + 4) / 256.0f,
+                            le32s(row + 8) / 256.0f
+                        }
+                    });
+                }
+
+                std::cerr << "[AFTB] effect=" << effectName
+                          << " tag=" << versionTag
+                          << " mounts=" << mountCount << "\n";
+                for (size_t i = 0; i < M.aftBurners.size(); ++i) {
+                    const auto& m = M.aftBurners[i];
+                    std::cerr << "[AFTB] mount " << i << " pos=("
+                              << m.pos.x << "," << m.pos.y << "," << m.pos.z << ")\n";
+                }
             }
         }
     }
@@ -1639,6 +1692,28 @@ int main(int argc, char** argv){
     glBindVertexArray(0);
     const GLsizei axisVertCount = (GLsizei)(sizeof(axisVerts)/sizeof(axisVerts[0]));
 
+    struct BurnerVertex { float x,y,z,r,g,b; };
+    GLuint burnerVAO = 0, burnerVBO = 0;
+    GLsizei burnerCount = 0;
+    if (!M.aftBurners.empty()) {
+        std::vector<BurnerVertex> burners;
+        burners.reserve(M.aftBurners.size());
+        for (const auto& b : M.aftBurners) {
+            burners.push_back(BurnerVertex{b.pos.x, b.pos.y, b.pos.z, 1.0f, 0.5f, 0.1f});
+        }
+        burnerCount = (GLsizei)burners.size();
+        glGenVertexArrays(1, &burnerVAO);
+        glGenBuffers(1, &burnerVBO);
+        glBindVertexArray(burnerVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, burnerVBO);
+        glBufferData(GL_ARRAY_BUFFER, burners.size() * sizeof(BurnerVertex), burners.data(), GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(BurnerVertex), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(BurnerVertex), (void*)(3 * sizeof(float)));
+        glBindVertexArray(0);
+    }
+
     const char* reticleVS =
         "#version 330 core\n"
         "layout(location=0) in vec2 aPos;\n"
@@ -1744,6 +1819,16 @@ int main(int argc, char** argv){
             glDrawElements(GL_TRIANGLES, b.idxCount, GL_UNSIGNED_INT, 0);
         }
         glBindVertexArray(0);
+
+        if (burnerCount > 0) {
+            glUseProgram(axisProg);
+            glUniformMatrix4fv(axisUMVP, 1, GL_FALSE, MVP.m);
+            glBindVertexArray(burnerVAO);
+            glPointSize(8.0f);
+            glDrawArrays(GL_POINTS, 0, burnerCount);
+            glBindVertexArray(0);
+            glUseProgram(prog);
+        }
 
         if(drawBox){
             drawBBox(bmin, bmax, axisProg, axisUMVP, MVP, std::array<float,3>{1.f, 1.f, 0.f});
