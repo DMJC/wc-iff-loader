@@ -455,6 +455,74 @@ static void applyRotation(Model& m, float yawDeg, float pitchDeg, float rollDeg)
     }
 }
 
+static void applyCargoYaw(Model& m, float yawDeg)
+{
+    if (std::fabs(yawDeg) <= 1e-6f) return;
+    // CRGO heading is around the ship's vertical axis (Z-up in model space).
+    glm::mat4 R = glm::rotate(glm::mat4(1.0f), glm::radians(yawDeg), glm::vec3(0,0,1));
+    for (auto& v : m.verts) {
+        glm::vec4 p(v.x, v.y, v.z, 1.0f);
+        p = R * p;
+        v.x = p.x; v.y = p.y; v.z = p.z;
+    }
+}
+
+static Model makeBoxModel(const std::string& name, float sx, float sy, float sz)
+{
+    Model m;
+    m.name = name;
+    const float hx = sx * 0.5f;
+    const float hy = sy * 0.5f;
+    const float hz = sz * 0.5f;
+    m.verts = {
+        {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
+        {-hx, -hy,  hz}, { hx, -hy,  hz}, { hx,  hy,  hz}, {-hx,  hy,  hz},
+    };
+    auto addTri = [&](uint32_t a, uint32_t b, uint32_t c){
+        Tri t;
+        t.v[0] = a; t.v[1] = b; t.v[2] = c;
+        t.hasTex = false;
+        m.tris.push_back(t);
+    };
+    // front/back
+    addTri(0,1,2); addTri(0,2,3);
+    addTri(5,4,7); addTri(5,7,6);
+    // left/right
+    addTri(4,0,3); addTri(4,3,7);
+    addTri(1,5,6); addTri(1,6,2);
+    // top/bottom
+    addTri(3,2,6); addTri(3,6,7);
+    addTri(4,5,1); addTri(4,1,0);
+    return m;
+}
+
+static bool makeCargoPlaceholderModel(const std::string& rawName, Model& out)
+{
+    if (rawName.empty()) return false;
+    std::string name = rawName;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+
+    // CRGO records often reference cargo classes that don't have standalone IFF meshes.
+    // Use coarse placeholders so mounts still render/export instead of silently disappearing.
+    if (name.rfind("box", 0) == 0) {
+        out = makeBoxModel("cargo_box", 12.0f, 12.0f, 12.0f);
+        return true;
+    }
+    if (name.rfind("truck", 0) == 0) {
+        out = makeBoxModel("cargo_truck", 26.0f, 10.0f, 14.0f);
+        return true;
+    }
+    if (name.rfind("drm", 0) == 0) {
+        out = makeBoxModel("cargo_drum", 8.0f, 10.0f, 8.0f);
+        return true;
+    }
+    if (name.size() >= 2 && name[name.size()-2] == '_' && name.back() == 'h') {
+        out = makeBoxModel("cargo_personnel", 6.0f, 14.0f, 6.0f);
+        return true;
+    }
+    return false;
+}
+
 // ----------------------------- Loader (HCl geometry + textures) -----------------------------
 static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     // Minimal IFF loader (recurses already in IFF::load)
@@ -956,15 +1024,18 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
         };
         struct CargoRec {
             std::string name;
-            glm::vec3   shipPosition{0.0f}; // decoded ship-space placement (X/Z 16.16, Y 8.8)
+            glm::vec3   shipPosition{0.0f}; // viewer-space placement
             float       yawDeg = 0.0f;
-            float       pitchDeg = 0.0f;
-            float       rollDeg = 0.0f;
             int16_t     sentinel = 0;
             int32_t     rawYaw = 0;
+            int16_t     rawPitch = 0;
+            int8_t      rawRoll = 0;
             int32_t     rawX = 0;
             int32_t     rawY = 0;
             int32_t     rawZ = 0;
+            float       srcX = 0.0f;
+            float       srcY = 0.0f;
+            float       srcZ = 0.0f;
         };
         std::vector<CargoRec> cargos;
         cargos.reserve(entryCount);
@@ -988,14 +1059,16 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
                 rec.rawY = rawY;
                 rec.rawZ = rawZ;
                 rec.rawYaw = rawYaw;
-                rec.shipPosition = glm::vec3(
-                    rawX / 65536.0f,
-                    rawY / 256.0f,
-                    rawZ / 65536.0f
-                );
+                rec.rawPitch = rawPitch;
+                rec.rawRoll = rawRoll;
+                // CRGO coordinates are mixed fixed-point: X/Z are 16.16 and Y is 8.8.
+                // The source coordinate frame is X-right, Y-up, Z-forward while the
+                // viewer model frame uses X-right, Y-forward, Z-up, so swap Y/Z.
+                rec.srcX = rawX / 65536.0f;
+                rec.srcY = rawY / 256.0f;
+                rec.srcZ = rawZ / 65536.0f;
+                rec.shipPosition = glm::vec3(rec.srcX, rec.srcZ, rec.srcY);
                 rec.yawDeg   = normalizeDegrees(rawYaw / 65536.0f);
-                rec.pitchDeg = rawPitch / 256.0f;
-                rec.rollDeg  = static_cast<float>(rawRoll);
                 rec.sentinel = sentinel;
                 cargos.push_back(rec);
             }
@@ -1007,10 +1080,13 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             const auto& C = cargos[i];
             Model cargoModel;
             if (!loadSubModel(C.name, cargoModel)) {
-                std::cerr << "[CRGO] Missing " << C.name << ".IFF\n";
-                continue;
+                if (!makeCargoPlaceholderModel(C.name, cargoModel)) {
+                    std::cerr << "[CRGO] Missing " << C.name << ".IFF\n";
+                    continue;
+                }
+                std::cerr << "[CRGO] Using placeholder for cargo type " << C.name << "\n";
             }
-            applyRotation(cargoModel, C.yawDeg, C.pitchDeg, C.rollDeg);
+            applyCargoYaw(cargoModel, C.yawDeg);
             glm::vec3 pos = C.shipPosition;
             std::string subName = "cargo_" + std::to_string(i) + "_" + C.name;
             M.submodels.push_back(SubModel{
@@ -1022,11 +1098,12 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             });
             std::cerr << "[CRGO] " << C.name
                       << " posRaw=(" << C.rawX << "," << C.rawY << "," << C.rawZ << ")"
+                      << " src=(" << C.srcX << "," << C.srcY << "," << C.srcZ << ")"
                       << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
                       << " yawRaw=" << C.rawYaw
                       << " yaw=" << C.yawDeg
-                      << " pitch=" << C.pitchDeg
-                      << " roll=" << C.rollDeg
+                      << " pitchRaw=" << C.rawPitch
+                      << " rollRaw=" << int(C.rawRoll)
                       << " flag=" << C.sentinel
                       << "\n";
         }
