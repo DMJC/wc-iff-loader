@@ -455,6 +455,62 @@ static void applyRotation(Model& m, float yawDeg, float pitchDeg, float rollDeg)
     }
 }
 
+static Model makeBoxModel(const std::string& name, float sx, float sy, float sz)
+{
+    Model m;
+    m.name = name;
+    const float hx = sx * 0.5f;
+    const float hy = sy * 0.5f;
+    const float hz = sz * 0.5f;
+    m.verts = {
+        {-hx, -hy, -hz}, { hx, -hy, -hz}, { hx,  hy, -hz}, {-hx,  hy, -hz},
+        {-hx, -hy,  hz}, { hx, -hy,  hz}, { hx,  hy,  hz}, {-hx,  hy,  hz},
+    };
+    auto addTri = [&](uint32_t a, uint32_t b, uint32_t c){
+        Tri t;
+        t.v[0] = a; t.v[1] = b; t.v[2] = c;
+        t.hasTex = false;
+        m.tris.push_back(t);
+    };
+    // front/back
+    addTri(0,1,2); addTri(0,2,3);
+    addTri(5,4,7); addTri(5,7,6);
+    // left/right
+    addTri(4,0,3); addTri(4,3,7);
+    addTri(1,5,6); addTri(1,6,2);
+    // top/bottom
+    addTri(3,2,6); addTri(3,6,7);
+    addTri(4,5,1); addTri(4,1,0);
+    return m;
+}
+
+static bool makeCargoPlaceholderModel(const std::string& rawName, Model& out)
+{
+    if (rawName.empty()) return false;
+    std::string name = rawName;
+    std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+
+    // CRGO records often reference cargo classes that don't have standalone IFF meshes.
+    // Use coarse placeholders so mounts still render/export instead of silently disappearing.
+    if (name.rfind("box", 0) == 0) {
+        out = makeBoxModel("cargo_box", 12.0f, 12.0f, 12.0f);
+        return true;
+    }
+    if (name.rfind("truck", 0) == 0) {
+        out = makeBoxModel("cargo_truck", 26.0f, 10.0f, 14.0f);
+        return true;
+    }
+    if (name.rfind("drm", 0) == 0) {
+        out = makeBoxModel("cargo_drum", 8.0f, 10.0f, 8.0f);
+        return true;
+    }
+    if (name.size() >= 2 && name[name.size()-2] == '_' && name.back() == 'h') {
+        out = makeBoxModel("cargo_personnel", 6.0f, 14.0f, 6.0f);
+        return true;
+    }
+    return false;
+}
+
 // ----------------------------- Loader (HCl geometry + textures) -----------------------------
 static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     // Minimal IFF loader (recurses already in IFF::load)
@@ -1007,8 +1063,11 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
             const auto& C = cargos[i];
             Model cargoModel;
             if (!loadSubModel(C.name, cargoModel)) {
-                std::cerr << "[CRGO] Missing " << C.name << ".IFF\n";
-                continue;
+                if (!makeCargoPlaceholderModel(C.name, cargoModel)) {
+                    std::cerr << "[CRGO] Missing " << C.name << ".IFF\n";
+                    continue;
+                }
+                std::cerr << "[CRGO] Using placeholder for cargo type " << C.name << "\n";
             }
             applyRotation(cargoModel, C.yawDeg, C.pitchDeg, C.rollDeg);
             glm::vec3 pos = C.shipPosition;
