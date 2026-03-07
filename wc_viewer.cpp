@@ -724,6 +724,25 @@ static void appendModelInto(Model& dst,
     }
 }
 
+static void centerModelAtOrigin(Model& M)
+{
+    if (M.verts.empty()) return;
+
+    Vec3 bmin{+1e9f,+1e9f,+1e9f};
+    Vec3 bmax{-1e9f,-1e9f,-1e9f};
+    for (const auto& v : M.verts) {
+        bmin.x = std::min(bmin.x, v.x); bmin.y = std::min(bmin.y, v.y); bmin.z = std::min(bmin.z, v.z);
+        bmax.x = std::max(bmax.x, v.x); bmax.y = std::max(bmax.y, v.y); bmax.z = std::max(bmax.z, v.z);
+    }
+
+    Vec3 center{(bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f, (bmin.z + bmax.z) * 0.5f};
+    for (auto& v : M.verts) {
+        v.x -= center.x;
+        v.y -= center.y;
+        v.z -= center.z;
+    }
+}
+
 static void flattenSubmodelsInto(Model& dst)
 {
     if (dst.submodels.empty()) return;
@@ -1366,6 +1385,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     }
 
     flattenSubmodelsInto(M);
+    centerModelAtOrigin(M);
     return true;
 }
 
