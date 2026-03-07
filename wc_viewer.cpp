@@ -90,6 +90,93 @@ struct ObjGroup {
     size_t triCount = 0;  // how many triangles belong to this group
 };
 
+struct ExplosionDef {
+    std::string type;
+    uint32_t primary = 0;
+    uint32_t secondary = 0;
+};
+
+struct DebrisSpawnEntry {
+    std::string name;
+    int16_t type = 0;
+    int16_t sizeX = 0, sizeY = 0, sizeZ = 0;
+    int16_t offX = 0, offY = 0, offZ = 0;
+    int16_t velRangeX = 0, velRangeY = 0, velRangeZ = 0;
+    int16_t velX = 0, velY = 0, velZ = 0;
+};
+
+struct ObjExtents {
+    float radius = 0.0f;
+    uint16_t flags0 = 0;
+    uint16_t flags1 = 0;
+    uint8_t nodeCount = 0;
+    std::string nodeName;
+    float centerYOffset = 0.0f;
+    float minX = 0.0f, maxX = 0.0f;
+    float minY = 0.0f, maxY = 0.0f;
+    float zExtent = 0.0f;
+};
+
+struct PolyAttrEntry {
+    uint16_t faceIndex = 0;
+    uint16_t materialFlags = 0;
+    uint32_t surfaceProps = 0;
+    uint8_t renderFlags = 0;
+};
+
+struct PolyXatrEntry {
+    uint16_t faceIndex = 0;
+    uint8_t flag0 = 0;
+    uint8_t flag1 = 0;
+};
+
+struct GunMountEntry {
+    std::string weaponType;
+    uint8_t gunCount = 0;
+    glm::vec3 position{0.0f};
+};
+
+struct MissileMountEntry {
+    std::string weaponType;
+    uint8_t missileCount = 0;
+    uint32_t reloadOrType = 0;
+    glm::vec3 position{0.0f};
+};
+
+struct ParsedChunkData {
+    std::string realName;
+    std::string objtType;
+    std::optional<ObjExtents> exte;
+    std::optional<ExplosionDef> expl;
+    std::optional<ExplosionDef> sxpl;
+    std::vector<DebrisSpawnEntry> debrisSpawns;
+    std::optional<uint16_t> debrisTypeCode;
+    std::vector<uint32_t> dynmFgtr;
+    std::vector<uint32_t> dynmCptl;
+    std::optional<int32_t> ctrlFgtr;
+    std::optional<int32_t> ctrlCptl;
+    std::vector<uint32_t> damgFgtr;
+    std::optional<uint32_t> damgCptl;
+    std::vector<glm::vec3> aftbPositions;
+    uint32_t aftbAfterburners = 0;
+    uint32_t aftbEngines = 0;
+    std::string aftbTypeName;
+    std::string shieldType;
+    std::vector<uint32_t> shieldFgtr;
+    std::vector<uint32_t> shieldCptl;
+    std::vector<PolyAttrEntry> attrs;
+    std::vector<PolyXatrEntry> xattrs;
+    std::vector<ObjGroup> chunkGroups;
+    std::string cargoCategory;
+    uint16_t tgunGunCount = 0;
+    std::vector<glm::vec3> tgunPositions;
+    std::vector<GunMountEntry> guns;
+    std::vector<MissileMountEntry> missiles;
+    uint32_t missileRangeOrCapacity = 0;
+    uint32_t decoyCapacity = 0;
+    std::string decoyLauncher;
+};
+
 struct SubModel;
 struct Model{
     vector<Vec3> verts;
@@ -98,6 +185,7 @@ struct Model{
     string name;
     vector<SubModel> submodels;
     vector<ObjGroup> groups;
+    ParsedChunkData chunkData;
 };
 struct SubModel {
     std::string name;
@@ -229,6 +317,250 @@ static const Chunk* childOf(const Chunk* c, const char* id){
     for(const auto& ch : c->children) if(ch.id==id) return &ch;
     return nullptr;
 }
+static std::string readFixedString(const uint8_t* p, size_t n){
+    size_t len = 0;
+    while(len < n && p[len] != 0) ++len;
+    std::string out(reinterpret_cast<const char*>(p), len);
+    while(!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+static std::optional<ExplosionDef> parseExplosionData(const Chunk* form, const IFF& iff){
+    if(!form) return std::nullopt;
+    const Chunk* data = childOf(form, "DATA");
+    if(!data || data->size < 17) return std::nullopt;
+    const uint8_t* p = &iff.buf[data->payload];
+    ExplosionDef d;
+    d.type = readFixedString(p, 9);
+    d.primary = (uint32_t)le32s(p + 9);
+    d.secondary = (uint32_t)le32s(p + 13);
+    return d;
+}
+
+static void parseObjtAndPolyChunkData(const IFF& iff, Model& M){
+    const Chunk* realInfo = childOf(&iff.root, "INFO");
+    if(realInfo && realInfo->size >= 8){
+        M.chunkData.realName = readFixedString(&iff.buf[realInfo->payload], 8);
+    }
+
+    const Chunk* objt = findFirst(&iff.root, "FORM", "OBJT");
+    if(objt){
+        for(const auto& ch : objt->children){
+            if(ch.id == "FORM"){
+                if(M.chunkData.objtType.empty() && (ch.formType=="SSHP" || ch.formType=="DEBR" || ch.formType=="TURT" || ch.formType=="TGUN" || ch.formType=="CRGO")){
+                    M.chunkData.objtType = ch.formType;
+                }
+                if(ch.formType=="DEBR"){
+                    const Chunk* info = childOf(&ch, "INFO");
+                    if(info && info->size>=2) M.chunkData.debrisTypeCode = le16u(&iff.buf[info->payload]);
+                    const Chunk* expl = findFirst(&ch, "FORM", "EXPL");
+                    if(expl) M.chunkData.expl = parseExplosionData(expl, iff);
+                    const Chunk* sxpl = findFirst(&ch, "FORM", "SXPL");
+                    if(sxpl) M.chunkData.sxpl = parseExplosionData(sxpl, iff);
+                }
+                if(ch.formType=="CRGO"){
+                    if(const Chunk* data = childOf(&ch, "DATA")){
+                        if(data->size >= 16){
+                            M.chunkData.cargoCategory = readFixedString(&iff.buf[data->payload], 16);
+                        }
+                    }
+                    if(const Chunk* expl=findFirst(&ch, "FORM", "EXPL")) M.chunkData.expl = parseExplosionData(expl, iff);
+                }
+                if(ch.formType=="TGUN"){
+                    if(const Chunk* data = childOf(&ch, "DATA")){
+                        if(data->size >= 4){
+                            const uint8_t* p = &iff.buf[data->payload];
+                            M.chunkData.tgunGunCount = le16u(p+0);
+                            size_t posCount = (data->size - 4) / 12;
+                            M.chunkData.tgunPositions.reserve(posCount);
+                            for(size_t i=0;i<posCount;i++){
+                                const uint8_t* e = p + 4 + i*12;
+                                M.chunkData.tgunPositions.push_back(glm::vec3(le32s(e+0)/256.0f, le32s(e+4)/256.0f, le32s(e+8)/256.0f));
+                            }
+                        }
+                    }
+                }
+                if(ch.formType=="TURT"){
+                    if(const Chunk* expl=findFirst(&ch, "FORM", "EXPL")) M.chunkData.expl = parseExplosionData(expl, iff);
+                }
+                if(ch.formType=="SSHP"){
+                    if(const Chunk* expl=findFirst(&ch, "FORM", "EXPL")) M.chunkData.expl = parseExplosionData(expl, iff);
+                    if(const Chunk* debr=findFirst(&ch, "FORM", "DEBR")){
+                        const Chunk* data = childOf(debr, "DATA");
+                        if(data && data->size >= 2){
+                            const uint8_t* p = &iff.buf[data->payload];
+                            uint16_t cnt = le16u(p);
+                            size_t available = (data->size - 2) / 34;
+                            size_t n = std::min<size_t>(cnt, available);
+                            M.chunkData.debrisSpawns.reserve(n);
+                            for(size_t i=0;i<n;i++){
+                                const uint8_t* e = p + 2 + i*34;
+                                DebrisSpawnEntry d;
+                                d.name = readFixedString(e+0, 8);
+                                d.type = (int16_t)le16u(e+8);
+                                d.sizeX = (int16_t)le16u(e+10);
+                                d.sizeY = (int16_t)le16u(e+12);
+                                d.sizeZ = (int16_t)le16u(e+14);
+                                d.offX = (int16_t)le16u(e+16);
+                                d.offY = (int16_t)le16u(e+18);
+                                d.offZ = (int16_t)le16u(e+20);
+                                d.velRangeX = (int16_t)le16u(e+22);
+                                d.velRangeY = (int16_t)le16u(e+24);
+                                d.velRangeZ = (int16_t)le16u(e+26);
+                                d.velX = (int16_t)le16u(e+28);
+                                d.velY = (int16_t)le16u(e+30);
+                                d.velZ = (int16_t)le16u(e+32);
+                                M.chunkData.debrisSpawns.push_back(d);
+                            }
+                        }
+                    }
+                    if(const Chunk* dynm=findFirst(&ch, "FORM", "DYNM")){
+                        if(const Chunk* fgtr=childOf(dynm,"FGTR")){
+                            const uint8_t* p=&iff.buf[fgtr->payload];
+                            for(size_t i=0;i+4<=fgtr->size;i+=4) M.chunkData.dynmFgtr.push_back((uint32_t)le32s(p+i));
+                        }
+                        if(const Chunk* cptl=childOf(dynm,"CPTL")){
+                            const uint8_t* p=&iff.buf[cptl->payload];
+                            for(size_t i=0;i+4<=cptl->size;i+=4) M.chunkData.dynmCptl.push_back((uint32_t)le32s(p+i));
+                        }
+                    }
+                    if(const Chunk* ctrl=findFirst(&ch, "FORM", "CTRL")){
+                        if(const Chunk* fgtr=childOf(ctrl,"FGTR")) if(fgtr->size>=4) M.chunkData.ctrlFgtr = le32s(&iff.buf[fgtr->payload]);
+                        if(const Chunk* cptl=childOf(ctrl,"CPTL")) if(cptl->size>=4) M.chunkData.ctrlCptl = le32s(&iff.buf[cptl->payload]);
+                    }
+                    if(const Chunk* damg=findFirst(&ch, "FORM", "DAMG")){
+                        if(const Chunk* fgtr=childOf(damg,"FGTR")){
+                            const uint8_t* p=&iff.buf[fgtr->payload];
+                            for(size_t i=0;i+4<=fgtr->size;i+=4) M.chunkData.damgFgtr.push_back((uint32_t)le32s(p+i));
+                        }
+                        if(const Chunk* cptl=childOf(damg,"CPTL")) if(cptl->size>=4) M.chunkData.damgCptl = (uint32_t)le32s(&iff.buf[cptl->payload]);
+                    }
+                    if(const Chunk* aftb=findFirst(&ch, "FORM", "AFTB")){
+                        if(const Chunk* data=childOf(aftb,"DATA")){
+                            if(data->size >= 16){
+                                const uint8_t* p=&iff.buf[data->payload];
+                                M.chunkData.aftbAfterburners = (uint32_t)le32s(p+0);
+                                M.chunkData.aftbEngines = (uint32_t)le32s(p+4);
+                                M.chunkData.aftbTypeName = readFixedString(p+8, 8);
+                                size_t posCount = (data->size - 16) / 12;
+                                M.chunkData.aftbPositions.reserve(posCount);
+                                for(size_t i=0;i<posCount;i++){
+                                    const uint8_t* e = p + 16 + i*12;
+                                    M.chunkData.aftbPositions.push_back(glm::vec3(le32s(e+0)/256.0f, le32s(e+4)/256.0f, le32s(e+8)/256.0f));
+                                }
+                            }
+                        }
+                    }
+                    if(const Chunk* weap=findFirst(&ch, "FORM", "WEAP")){
+                        if(const Chunk* fgtr=findFirst(weap, "FORM", "FGTR")){
+                            if(const Chunk* guns=childOf(fgtr, "GUNS")){
+                                if(guns->size >= 9){
+                                    const uint8_t* p = &iff.buf[guns->payload];
+                                    size_t rows = (guns->size - 9) / 21;
+                                    for(size_t i=0;i<rows;i++){
+                                        const uint8_t* e = p + 9 + i*21;
+                                        GunMountEntry ge;
+                                        ge.weaponType = readFixedString(e+0, 8);
+                                        ge.gunCount = e[8];
+                                        ge.position = glm::vec3(le32s(e+9)/256.0f, le32s(e+13)/256.0f, le32s(e+17)/256.0f);
+                                        M.chunkData.guns.push_back(std::move(ge));
+                                    }
+                                }
+                            }
+                            if(const Chunk* misl=childOf(fgtr, "MISL")){
+                                if(misl->size >= 4){
+                                    const uint8_t* p = &iff.buf[misl->payload];
+                                    M.chunkData.missileRangeOrCapacity = (uint32_t)le32s(p+0);
+                                    size_t rows = (misl->size - 4) / 25;
+                                    for(size_t i=0;i<rows;i++){
+                                        const uint8_t* e = p + 4 + i*25;
+                                        MissileMountEntry me;
+                                        me.weaponType = readFixedString(e+0, 8);
+                                        me.missileCount = e[8];
+                                        me.reloadOrType = (uint32_t)le32s(e+9);
+                                        me.position = glm::vec3(le32s(e+13)/256.0f, le32s(e+17)/256.0f, le32s(e+21)/256.0f);
+                                        M.chunkData.missiles.push_back(std::move(me));
+                                    }
+                                }
+                            }
+                            if(const Chunk* decy=childOf(fgtr, "DECY")){
+                                if(decy->size >= 4){
+                                    const uint8_t* p = &iff.buf[decy->payload];
+                                    M.chunkData.decoyCapacity = (uint32_t)le32s(p+0);
+                                    if(decy->size > 4) M.chunkData.decoyLauncher = readFixedString(p+4, decy->size-4);
+                                }
+                            }
+                        }
+                    }
+                    if(const Chunk* shld=findFirst(&ch, "FORM", "SHLD")){
+                        if(const Chunk* data=childOf(shld,"DATA")) if(data->size>=8) M.chunkData.shieldType = readFixedString(&iff.buf[data->payload], 8);
+                        if(const Chunk* fgtr=childOf(shld,"FGTR")){
+                            const uint8_t* p=&iff.buf[fgtr->payload];
+                            for(size_t i=0;i+4<=fgtr->size;i+=4) M.chunkData.shieldFgtr.push_back((uint32_t)le32s(p+i));
+                        }
+                        if(const Chunk* cptl=childOf(shld,"CPTL")){
+                            const uint8_t* p=&iff.buf[cptl->payload];
+                            for(size_t i=0;i+4<=cptl->size;i+=4) M.chunkData.shieldCptl.push_back((uint32_t)le32s(p+i));
+                        }
+                    }
+                }
+            }else if(ch.id=="EXTE"){
+                const uint8_t* p = &iff.buf[ch.payload];
+                ObjExtents ex;
+                if(ch.size >= 8){
+                    ex.radius = le32s(p+0) / 256.0f;
+                    ex.flags0 = le16u(p+4);
+                    ex.flags1 = le16u(p+6);
+                }
+                if(ch.size >= 40){
+                    ex.nodeCount = p[6];
+                    ex.nodeName = readFixedString(p+7, 9);
+                    ex.centerYOffset = le32s(p+16) / 256.0f;
+                    ex.minX = le32s(p+20) / 256.0f;
+                    ex.maxX = le32s(p+24) / 256.0f;
+                    ex.minY = le32s(p+28) / 256.0f;
+                    ex.maxY = le32s(p+32) / 256.0f;
+                    ex.zExtent = le32s(p+36) / 256.0f;
+                }
+                M.chunkData.exte = ex;
+            }
+        }
+    }
+
+    if (const Chunk* APPR = findFirst(&iff.root, "FORM", "APPR")) {
+        if (const Chunk* POLY = findFirst(APPR, "FORM", "POLY")) {
+            if (const Chunk* ATTR = childOf(POLY, "ATTR")) {
+                const uint8_t* p = &iff.buf[ATTR->payload];
+                size_t rows = ATTR->size / 9;
+                M.chunkData.attrs.reserve(rows);
+                for(size_t i=0;i<rows;i++){
+                    const uint8_t* e = p + i*9;
+                    M.chunkData.attrs.push_back(PolyAttrEntry{le16u(e+0), le16u(e+2), (uint32_t)le32s(e+4), e[8]});
+                }
+            }
+            if (const Chunk* XATR = childOf(POLY, "XATR")) {
+                const uint8_t* p = &iff.buf[XATR->payload];
+                size_t rows = XATR->size / 4;
+                M.chunkData.xattrs.reserve(rows);
+                for(size_t i=0;i<rows;i++){
+                    const uint8_t* e = p + i*4;
+                    M.chunkData.xattrs.push_back(PolyXatrEntry{le16u(e+0), e[2], e[3]});
+                }
+            }
+            if (const Chunk* grup = findFirst(POLY, "FORM", "GRUP")) {
+                for(const auto& ch: grup->children){
+                    if(ch.id != "LIST" || ch.size < 8) continue;
+                    ObjGroup g;
+                    g.name = readFixedString(&iff.buf[ch.payload], 8);
+                    g.firstTri = 0;
+                    g.triCount = 0;
+                    M.chunkData.chunkGroups.push_back(std::move(g));
+                }
+            }
+        }
+    }
+}
+
 
 // ----------------------------- TXMP decode (WC3) -----------------------------
 // TXMP payload layout (WC3):
@@ -460,6 +792,7 @@ static bool load_wc3_model_hcl_textured(const string& path, Model& M){
     // Minimal IFF loader (recurses already in IFF::load)
     IFF iff; if(!iff.load(path)){ std::cerr<<"Not a REAL/FORM IFF\n"; return false; }
     M.name = stemFromPath(path);
+    parseObjtAndPolyChunkData(iff, M);
 
     std::string baseDir = path;
     {
